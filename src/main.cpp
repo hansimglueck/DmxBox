@@ -34,7 +34,16 @@ long lastLampToggle = millis();
 // uint8_t data[DMX_MAX_FRAME];
 
 // Replace with your network credentials
-const char* password = "12345678";
+#ifndef WIFI_SSID
+#define WIFI_SSID "nutantPlus23"  // Fallback if not defined in platformio.ini
+#endif
+
+#ifndef WIFI_PASSWORD
+#define WIFI_PASSWORD "12345678"  // Fallback if not defined in platformio.ini
+#endif
+
+const char* ssid = WIFI_SSID;
+const char* password = WIFI_PASSWORD;
 
 const byte DNS_PORT = 53;
 DNSServer dnsServer;
@@ -60,7 +69,6 @@ const int output27 = 27;
 
 //SharpyPlus
 #define CHANNELS 31
-const char* ssid     = "nutantPlus23";
 
 // Fixture configuration
 #define NUM_FIXTURES 10
@@ -349,19 +357,34 @@ public:
 };
 
 void copyDataToDMXBuffer() {
-  for (int i=0; i<=CHANNELS; i++) {  
+  static unsigned long lastDebug = 0;
+  
+  for (int i=0; i<=511; i++) {  
     dmxBuffer[i+1] = data[i+1];
   }
+  
   // if data[ctrlChannel] == lampOnValue then toggle dmxBuffer[ctrlChannel] every 6 seconds between 0 and lampOnValue
   if (data[controlChannel] == lampOnValue) {
     if (millis() - lastLampToggle > 6000) {
       lastLampToggle = millis();
       if (dmxBuffer[controlChannel] == 0) {
         dmxBuffer[controlChannel] = lampOnValue;
+        Serial.println("Lamp toggle: ON");
       } else {
         dmxBuffer[controlChannel] = 0;
+        Serial.println("Lamp toggle: OFF");
       }
     }
+  }
+  
+  // Debug output every 5 seconds
+  if (millis() - lastDebug > 5000) {
+    lastDebug = millis();
+    Serial.println("=== DMX Buffer Status ===");
+    for (int i = 1; i <= min(10, CHANNELS); i++) {
+      Serial.printf("CH%d: %d ", i, dmxBuffer[i]);
+    }
+    Serial.println("\n========================");
   }
 }
 
@@ -395,30 +418,41 @@ void saveEEPROM() {
 void setup(){
   // initialize digital pin LED_BUILTIN as an output.
   Serial.begin(115200);
+  delay(1000);
+  Serial.println("\n\n=== DMX Box Starting ===");
   Serial.print("setup");
   WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP
   setupOTA("dmxbox", "12345678");
 
   // initialize EEPROM with predefined size
   EEPROM.begin(1024);  // Increased size for fixture config
+  Serial.println("EEPROM initialized (1024 bytes)");
 
   // Initialize SPIFFS
   if(!SPIFFS.begin(true)){
     Serial.println("An Error has occurred while mounting SPIFFS");
     return;
   }
+  Serial.println("SPIFFS mounted successfully");
 
-  dmx_set_pin(dmxPort, DMX_SERIAL_OUTPUT_PIN, DMX_SERIAL_INPUT_PIN, DMX_DIRECTION_PIN);
-  
+  // DMX Setup - FIRST install driver, THEN set pins
+  Serial.println("Installing DMX driver...");
   dmx_config_t config = DMX_CONFIG_DEFAULT;
-  dmx_driver_install(dmxPort, &config, DMX_DEFAULT_INTR_FLAGS);
-
-
-  // from old library:
-  // pinMode(DMX_DIRECTION_PIN, OUTPUT);
-  // digitalWrite(DMX_DIRECTION_PIN, HIGH);
-  // pinMode(DMX_SERIAL_OUTPUT_PIN, OUTPUT);
-  // ESP32DMX.startOutput(DMX_SERIAL_OUTPUT_PIN);
+  esp_err_t err = dmx_driver_install(dmxPort, &config, DMX_DEFAULT_INTR_FLAGS);
+  if (err == ESP_OK) {
+    Serial.printf("DMX driver installed successfully on port %d\n", dmxPort);
+  } else {
+    Serial.printf("ERROR: DMX driver installation failed with code %d\n", err);
+  }
+  
+  Serial.printf("Setting DMX pins: TX=%d, RX=%d, DIR=%d\n", 
+                DMX_SERIAL_OUTPUT_PIN, DMX_SERIAL_INPUT_PIN, DMX_DIRECTION_PIN);
+  err = dmx_set_pin(dmxPort, DMX_SERIAL_OUTPUT_PIN, DMX_SERIAL_INPUT_PIN, DMX_DIRECTION_PIN);
+  if (err == ESP_OK) {
+    Serial.println("DMX pins set successfully");
+  } else {
+    Serial.printf("ERROR: DMX pin setup failed with code %d\n", err);
+  }
 
   Serial.println("setup dmx complete");
 
@@ -427,8 +461,13 @@ void setup(){
   for (int i=0; i<=CHANNELS; i++) {  
     data[i+1] = EEPROM.read(EEPROM_DMX_START + i + 1);
   }
+  Serial.printf("Loaded %d channels from EEPROM\n", CHANNELS);
   
   initFixtures();
+  Serial.println("Fixtures initialized:");
+  for (int i = 0; i < NUM_FIXTURES; i++) {
+    Serial.printf("  %s: Start Address = %d\n", fixtures[i].name, fixtures[i].startAddress);
+  }
 
   // Connect to Wi-Fi network with SSID and password
   Serial.print("Setting AP (Access Point)…");
@@ -547,10 +586,10 @@ void setup(){
     response->printf("<a href='/channel?fix=%d&ch=%d&delta=-10'><button class='button'>-10</button></a>", fixtureId, channelOffset);
     response->printf("<a href='/channel?fix=%d&ch=%d&delta=-5'><button class='button'>-5</button></a>", fixtureId, channelOffset);
     response->printf("<a href='/channel?fix=%d&ch=%d&delta=-1'><button class='button'>-1</button></a><br>", fixtureId, channelOffset);
-    response->printf("<a href='/channel?fix=%d&ch=%d&delta=1'><button class='button'>+1</button></a>", fixtureId, channelOffset);
-    response->printf("<a href='/channel?fix=%d&ch=%d&delta=5'><button class='button'>+5</button></a>", fixtureId, channelOffset);
-    response->printf("<a href='/channel?fix=%d&ch=%d&delta=10'><button class='button'>+10</button></a>", fixtureId, channelOffset);
     response->printf("<a href='/channel?fix=%d&ch=%d&delta=50'><button class='button'>+50</button></a>", fixtureId, channelOffset);
+    response->printf("<a href='/channel?fix=%d&ch=%d&delta=10'><button class='button'>+10</button></a>", fixtureId, channelOffset);
+    response->printf("<a href='/channel?fix=%d&ch=%d&delta=5'><button class='button'>+5</button></a>", fixtureId, channelOffset);
+    response->printf("<a href='/channel?fix=%d&ch=%d&delta=1'><button class='button'>+1</button></a>", fixtureId, channelOffset);
     response->print("</div>");
     
     response->print("</body></html>");
@@ -576,6 +615,7 @@ void setup(){
   server.addHandler(new CaptiveRequestHandler()).setFilter(ON_AP_FILTER);//only when requested from AP
 
   server.begin();
+  Serial.println("=== Setup Complete - Web Server Started ===\n");
 }
 
 // void copyDMXToOutput(void) {
@@ -587,13 +627,25 @@ void setup(){
 // }
 
 void loop(){
+  static unsigned long loopCounter = 0;
+  static unsigned long lastLoopDebug = 0;
+  
   processOTA();
   dnsServer.processNextRequest();
   copyDataToDMXBuffer();
+  
+  dmx_wait_sent(dmxPort, DMX_TIMEOUT_TICK);
   dmx_write(dmxPort, dmxBuffer, DMX_PACKET_SIZE);
   dmx_send(dmxPort, DMX_PACKET_SIZE);
-
-  // copyDMXToOutput(); 
-  // esp_task_wdt_reset();
-  // vTaskDelay(100);
+  
+  loopCounter++;
+  
+  // Debug output every 10 seconds
+  if (millis() - lastLoopDebug > 10000) {
+    lastLoopDebug = millis();
+    Serial.printf("Loop count: %lu, Uptime: %lu ms\n", loopCounter, millis());
+    Serial.printf("DMX sent on port %d, packet size: %d\n", dmxPort, DMX_PACKET_SIZE);
+  }
+  
+  delay(10); // Small delay to prevent watchdog issues
 }
