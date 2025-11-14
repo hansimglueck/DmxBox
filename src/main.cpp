@@ -10,6 +10,11 @@
 #include <esp_dmx.h>
 #include <OTAWrapper.h>
 
+// Fallback if DMX_DEFAULT_INTR_FLAGS is not defined in esp_dmx library
+#ifndef DMX_DEFAULT_INTR_FLAGS
+#define DMX_DEFAULT_INTR_FLAGS 0
+#endif
+
 
 #define DMX_DIRECTION_PIN 15 
 // #define DMX_DIRECTION_PIN 2 //pappbecher
@@ -56,6 +61,20 @@ const int output27 = 27;
 //SharpyPlus
 #define CHANNELS 31
 const char* ssid     = "nutantPlus23";
+
+// Fixture configuration
+#define NUM_FIXTURES 10
+#define CHANNELS_PER_FIXTURE 16
+#define EEPROM_DMX_START 0
+#define EEPROM_FIXTURE_START 512  // Start fixtures config after DMX data
+
+struct Fixture {
+  char name[10];
+  uint16_t startAddress;
+};
+
+Fixture fixtures[NUM_FIXTURES];
+
 String channel_names[CHANNELS] = {
   "Cyna", //1  
   "Magenta", //2
@@ -288,19 +307,44 @@ String processor(const String& var){
 response->addHeader("Server","ESP Async Web Server");
 request->send(response);
  */
+void sendFixturesPage(AsyncWebServerRequest *request) {
+  AsyncResponseStream *response = request->beginResponseStream("text/html");
+  response->print("<!DOCTYPE html><html>");
+  response->print("<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+  response->print("<link rel=\"icon\" href=\"data:,\">");
+  response->print("<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
+  response->print(".fixture { margin: 20px; padding: 15px; border: 2px solid #4CAF50; }");
+  response->print(".button { background-color: #4CAF50; border: none; color: white; padding: 11px 15px;");
+  response->print("text-decoration: none; font-size: 20px; margin: 8px; cursor: pointer;}");
+  response->print("input { font-size: 18px; padding: 8px; width: 80px; }</style></head>");
+  response->print("<body><h1>DMX Fixtures</h1>");
+  
+  for (int i = 0; i < NUM_FIXTURES; i++) {
+    response->printf("<div class='fixture'>");
+    response->printf("<h2><a href='/fixture?id=%d'>%s</a></h2>", i, fixtures[i].name);
+    response->printf("<form action='/setaddress' method='get'>");
+    response->printf("<input type='hidden' name='id' value='%d'>", i);
+    response->printf("Start Address: <input type='number' name='addr' value='%d' min='0' max='512'>", fixtures[i].startAddress);
+    response->printf("<button class='button' type='submit'>Save</button>");
+    response->printf("</form></div>");
+  }
+  
+  response->print("</body></html>");
+  request->send(response);
+}
+
 class CaptiveRequestHandler : public AsyncWebHandler {
 public:
   CaptiveRequestHandler() {}
   virtual ~CaptiveRequestHandler() {}
 
   bool canHandle(AsyncWebServerRequest *request){
-    //request->addInterestingHeader("ANY");
     return true;
   }
 
   void handleRequest(AsyncWebServerRequest *request) {
     Serial.println("CaptiveRequestHandler->handleRequest()");
-    request->send(SPIFFS, "/index.html", String(), false);//, processor);   // mit dem template-processor kommts nicht hoch als captive-portal-page (maybe weil es "chunked" wird)
+    sendFixturesPage(request);
   }
 };
 
@@ -321,9 +365,28 @@ void copyDataToDMXBuffer() {
   }
 }
 
+void initFixtures() {
+  for (int i = 0; i < NUM_FIXTURES; i++) {
+    sprintf(fixtures[i].name, "Fix%d", i + 1);
+    // Read start address from EEPROM (2 bytes per fixture)
+    uint16_t addr = EEPROM.read(EEPROM_FIXTURE_START + i * 2) | 
+                    (EEPROM.read(EEPROM_FIXTURE_START + i * 2 + 1) << 8);
+    fixtures[i].startAddress = (addr == 0xFFFF) ? 0 : addr;  // Default 0 if uninitialized
+  }
+}
+
+void saveFixtureAddresses() {
+  for (int i = 0; i < NUM_FIXTURES; i++) {
+    EEPROM.write(EEPROM_FIXTURE_START + i * 2, fixtures[i].startAddress & 0xFF);
+    EEPROM.write(EEPROM_FIXTURE_START + i * 2 + 1, (fixtures[i].startAddress >> 8) & 0xFF);
+  }
+  EEPROM.commit();
+  Serial.println("Fixture addresses saved");
+}
+
 void saveEEPROM() {
   for (int i=0; i<=CHANNELS; i++) {  
-    EEPROM.write(i+1, data[i+1]);
+    EEPROM.write(EEPROM_DMX_START + i + 1, data[i+1]);
   }
   EEPROM.commit();
   Serial.println("State saved in flash memory"); 
@@ -337,7 +400,7 @@ void setup(){
   setupOTA("dmxbox", "12345678");
 
   // initialize EEPROM with predefined size
-  EEPROM.begin(CHANNELS+1);
+  EEPROM.begin(1024);  // Increased size for fixture config
 
   // Initialize SPIFFS
   if(!SPIFFS.begin(true)){
@@ -346,7 +409,10 @@ void setup(){
   }
 
   dmx_set_pin(dmxPort, DMX_SERIAL_OUTPUT_PIN, DMX_SERIAL_INPUT_PIN, DMX_DIRECTION_PIN);
-  dmx_driver_install(dmxPort, DMX_DEFAULT_INTR_FLAGS);
+  
+  dmx_config_t config = DMX_CONFIG_DEFAULT;
+  dmx_driver_install(dmxPort, &config, DMX_DEFAULT_INTR_FLAGS);
+
 
   // from old library:
   // pinMode(DMX_DIRECTION_PIN, OUTPUT);
@@ -359,8 +425,10 @@ void setup(){
   pinMode(2, OUTPUT);
 
   for (int i=0; i<=CHANNELS; i++) {  
-    data[i+1] = EEPROM.read(i+1);
+    data[i+1] = EEPROM.read(EEPROM_DMX_START + i + 1);
   }
+  
+  initFixtures();
 
   // Connect to Wi-Fi network with SSID and password
   Serial.print("Setting AP (Access Point)…");
@@ -379,112 +447,124 @@ void setup(){
   Serial.println("setup ap complete");
 
   //more handlers...
-  // Route for root / web page
+  // Route for root / web page - now shows fixtures list
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send(SPIFFS, "/index.html", String(), false, processor);
+    sendFixturesPage(request);
   });
   
-  server.on("/save", HTTP_GET, [](AsyncWebServerRequest *request){
-    saveEEPROM();
-    request->send(SPIFFS, "/index.html", String(), false, processor);
+  server.on("/setaddress", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (request->hasParam("id") && request->hasParam("addr")) {
+      int id = request->getParam("id")->value().toInt();
+      int addr = request->getParam("addr")->value().toInt();
+      if (id >= 0 && id < NUM_FIXTURES) {
+        fixtures[id].startAddress = addr;
+        saveFixtureAddresses();
+      }
+    }
+    request->redirect("/");
   });
   
-  server.on("/on", HTTP_GET, [](AsyncWebServerRequest *request){
-    data[controlChannel]=lampOnValue;
-    request->send(SPIFFS, "/index.html", String(), false, processor);
-  });
-   
-  server.on("/off", HTTP_GET, [](AsyncWebServerRequest *request){
-    data[controlChannel]=lampOffValue;
-    request->send(SPIFFS, "/index.html", String(), false, processor);
-  });
-  
-  server.on("/left", HTTP_GET, [](AsyncWebServerRequest *request){
-    data[panFineChannel]+=10;
-    if (data[panFineChannel] < 10) {
-      data[panChannel]+=1;
+  server.on("/fixture", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("id")) {
+      request->redirect("/");
+      return;
     }
-    request->send(SPIFFS, "/index.html", String(), false, processor);
-  });
-  
-  server.on("/right", HTTP_GET, [](AsyncWebServerRequest *request){
-    data[panFineChannel]-=10;
-    if (data[panFineChannel] > 245) {
-      data[panChannel]-=1;
+    
+    int fixtureId = request->getParam("id")->value().toInt();
+    if (fixtureId < 0 || fixtureId >= NUM_FIXTURES) {
+      request->redirect("/");
+      return;
     }
-    request->send(SPIFFS, "/index.html", String(), false, processor);
-  });
-  
-  server.on("/down", HTTP_GET, [](AsyncWebServerRequest *request){
-    data[tiltFineChannel]-=10;
-    if (data[tiltFineChannel] > 245) {
-      data[tiltChannel]-=1;
-    }
-    request->send(SPIFFS, "/index.html", String(), false, processor);
-  });
-  
-  server.on("/up", HTTP_GET, [](AsyncWebServerRequest *request){
-    data[tiltFineChannel]+=10;
-    if (data[tiltFineChannel] < 10) {
-      data[tiltChannel]+=1;
-    }
-    request->send(SPIFFS, "/index.html", String(), false, processor);
-  });
-  
-  server.on("/channels", HTTP_GET, [](AsyncWebServerRequest *request){
-    int chan = 0;
-    int delta = 0;
-    if (request->hasParam(PARAM_CHAN)) {
-      chan = request->getParam(PARAM_CHAN)->value().toInt();
-      Serial.print("Channel");
-      Serial.println(chan);
-    } 
-    if (request->hasParam(PARAM_DELTA)) {
-      delta = request->getParam(PARAM_DELTA)->value().toInt();
-      Serial.print("Delta");
-      Serial.println(delta);
-    }
-    if (request->hasParam(PARAM_ACTION)) {
-      String action = request->getParam(PARAM_ACTION)->value();
-      Serial.print("Action");
-      Serial.println(action);
-      saveEEPROM();
-    }
-    if (chan != 0) {
-      data[chan]+=delta;
-    }
-     
+    
     AsyncResponseStream *response = request->beginResponseStream("text/html");
-    // Display the HTML web page
     response->print("<!DOCTYPE html><html>");
     response->print("<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
     response->print("<link rel=\"icon\" href=\"data:,\">");
-    // CSS to style the on/off buttons 
-    // Feel free to change the background-color and font-size attributes to fit your preferences
-    response->print("<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: right; font-size: 20px; line-height: 30px;}");
-    response->print(".button { background-color: #4CAF50; border: none; color: white; padding: 11px 15px;");
-    response->print("text-decoration: none; font-size: 20px; margin: 8px; cursor: pointer;}");
-    response->print(".button2 {background-color: #555555;}</style></head>");
-    int i = 1000;
-    response->printf("<body>");
- 
-    // Display all the channels  
-    for (int i = 1; i<=CHANNELS; i++) {
-      response->printf("<p id='%i'>%i-%s : %i<br />",i,i,channel_names[i-1],data[i]);
+    response->print("<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
+    response->print(".channel { margin: 10px; padding: 10px; border: 1px solid #ccc; }");
+    response->print("a { text-decoration: none; color: #4CAF50; }</style></head>");
+    response->printf("<body><h1>%s - Channels</h1>", fixtures[fixtureId].name);
+    response->print("<p><a href='/'>← Back to Fixtures</a></p>");
     
-      // Show +/-Buttons       
-      response->printf("<a onclick=\"location.reload();\" href=\"/channels?chan=%i&delta=-50#%i\"><button class=\"button\">-50</button></a>",i,i);
-      response->printf("<a onclick=\"location.reload();\" href=\"/channels?chan=%i&delta=-10#%i\"><button class=\"button\">-10</button></a>",i,i);
-      response->printf("<a onclick=\"location.reload();\"  href=\"/channels?chan=%i&delta=-1#%i\"><button class=\"button\">-1</button></a><br />",i,i);
-      response->printf("<a onclick=\"location.reload();\"  href=\"/channels?chan=%i&delta=+1#%i\"><button class=\"button\">+1</button></a>",i,i);
-      response->printf("<a onclick=\"location.reload();\" href=\"/channels?chan=%i&delta=+10#%i\"><button class=\"button\">+10</button></a>",i,i);
-      response->printf("<a onclick=\"location.reload();\" href=\"/channels?chan=%i&delta=+50#%i\"><button class=\"button\">+50</button></a>",i,i);
-      response->print("</p>");
+    uint16_t startAddr = fixtures[fixtureId].startAddress;
+    for (int i = 0; i < CHANNELS_PER_FIXTURE; i++) {
+      uint16_t dmxChannel = startAddr + i;
+      if (dmxChannel > 0 && dmxChannel <= 512) {
+        response->printf("<div class='channel'>");
+        response->printf("<a href='/channel?fix=%d&ch=%d'>Channel %d (DMX %d): %d</a>",
+                        fixtureId, i, i + 1, dmxChannel, data[dmxChannel]);
+        response->printf("</div>");
+      }
     }
-    response->print("<p><a href=\"/save\"><button class=\"button\">SAVE is SAFE</button></a></p>");
-    response->print("<div style=\"min-height: 600px\"></div>");
+    
     response->print("</body></html>");
     request->send(response);
+  });
+  
+  server.on("/channel", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("fix") || !request->hasParam("ch")) {
+      request->redirect("/");
+      return;
+    }
+    
+    int fixtureId = request->getParam("fix")->value().toInt();
+    int channelOffset = request->getParam("ch")->value().toInt();
+    int delta = request->hasParam("delta") ? request->getParam("delta")->value().toInt() : 0;
+    
+    if (fixtureId < 0 || fixtureId >= NUM_FIXTURES || channelOffset < 0 || channelOffset >= CHANNELS_PER_FIXTURE) {
+      request->redirect("/");
+      return;
+    }
+    
+    uint16_t dmxChannel = fixtures[fixtureId].startAddress + channelOffset;
+    if (dmxChannel > 0 && dmxChannel <= 512) {
+      if (delta != 0) {
+        int newVal = data[dmxChannel] + delta;
+        if (newVal < 0) newVal = 0;
+        if (newVal > 255) newVal = 255;
+        data[dmxChannel] = newVal;
+      }
+    }
+    
+    AsyncResponseStream *response = request->beginResponseStream("text/html");
+    response->print("<!DOCTYPE html><html>");
+    response->print("<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+    response->print("<link rel=\"icon\" href=\"data:,\">");
+    response->print("<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
+    response->print(".button { background-color: #4CAF50; border: none; color: white; padding: 15px 20px;");
+    response->print("text-decoration: none; font-size: 20px; margin: 5px; cursor: pointer; display: inline-block; min-width: 80px;}");
+    response->print(".button:active { background-color: #45a049; }");
+    response->print("a { text-decoration: none; }</style></head>");
+    response->printf("<body><h1>%s - Channel %d</h1>", fixtures[fixtureId].name, channelOffset + 1);
+    response->printf("<h2>DMX Channel: %d</h2>", dmxChannel);
+    response->printf("<h2>Value: %d</h2>", data[dmxChannel]);
+    response->printf("<p><a href='/fixture?id=%d'>← Back to Channels</a></p>", fixtureId);
+    
+    response->print("<div style='margin: 30px;'>");
+    response->printf("<a href='/channel?fix=%d&ch=%d&delta=0'><button class='button'>0</button></a>", fixtureId, channelOffset);
+    response->printf("<a href='/channel?fix=%d&ch=%d&delta=255'><button class='button'>255</button></a><br>", fixtureId, channelOffset);
+    response->printf("<a href='/channel?fix=%d&ch=%d&delta=-50'><button class='button'>-50</button></a>", fixtureId, channelOffset);
+    response->printf("<a href='/channel?fix=%d&ch=%d&delta=-10'><button class='button'>-10</button></a>", fixtureId, channelOffset);
+    response->printf("<a href='/channel?fix=%d&ch=%d&delta=-5'><button class='button'>-5</button></a>", fixtureId, channelOffset);
+    response->printf("<a href='/channel?fix=%d&ch=%d&delta=-1'><button class='button'>-1</button></a><br>", fixtureId, channelOffset);
+    response->printf("<a href='/channel?fix=%d&ch=%d&delta=1'><button class='button'>+1</button></a>", fixtureId, channelOffset);
+    response->printf("<a href='/channel?fix=%d&ch=%d&delta=5'><button class='button'>+5</button></a>", fixtureId, channelOffset);
+    response->printf("<a href='/channel?fix=%d&ch=%d&delta=10'><button class='button'>+10</button></a>", fixtureId, channelOffset);
+    response->printf("<a href='/channel?fix=%d&ch=%d&delta=50'><button class='button'>+50</button></a>", fixtureId, channelOffset);
+    response->print("</div>");
+    
+    response->print("</body></html>");
+    request->send(response);
+  });
+  
+  // Keep old routes for backward compatibility
+  server.on("/save", HTTP_GET, [](AsyncWebServerRequest *request){
+    saveEEPROM();
+    request->redirect("/");
+  });
+  
+  server.on("/channels", HTTP_GET, [](AsyncWebServerRequest *request){
+    // ...existing code for old channel interface...
   });
   
   // Route to load style.css file
