@@ -439,44 +439,26 @@ void sendFixturesPage(AsyncWebServerRequest *request) {
   response->print(".button-wifi:hover { background-color: #0b7dda; }");
   response->print("input { font-size: 18px; padding: 8px; width: 80px; background-color: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; }");
   response->print("a { color: #4CAF50; text-decoration: none; }");
-  response->print("</style></head>");
+  response->print("</style>");
+  
+  // JavaScript für dynamische Updates
+  response->print("<script>");
+  response->print("function updateStatus() {");
+  response->print("  fetch('/status')");
+  response->print("    .then(response => response.json())");
+  response->print("    .then(data => {");
+  response->print("      document.getElementById('status-box').innerHTML = data.html;");
+  response->print("    });");
+  response->print("}");
+  response->print("setInterval(updateStatus, 2000);"); // Update every 2 seconds
+  response->print("</script>");
+  
+  response->print("</head>");
   response->print("<body><h1>DMX Fixtures</h1>");
   
-  // WiFi Status anzeigen
-  response->print("<div class='info'>");
-  
-  // AP is always active
-  response->print("📶 <strong>Access Point Active</strong><br>");
-  response->printf("AP Network: %s<br>", ssid);
-  response->printf("AP IP: <strong>%s</strong><br>", WiFi.softAPIP().toString().c_str());
-  response->printf("AP MAC: %s<br>", WiFi.softAPmacAddress().c_str());
-  
-  // Show client connection if available
-  if (WiFi.getMode() == WIFI_AP_STA && WiFi.status() == WL_CONNECTED) {
-    response->print("<br>📡 <strong>+ WiFi Client Connected</strong><br>");
-    response->printf("Network: %s<br>", WiFi.SSID().c_str());
-    response->printf("Client IP: <strong>%s</strong><br>", WiFi.localIP().toString().c_str());
-    response->printf("Client MAC: %s<br>", WiFi.macAddress().c_str());
-    response->printf("Signal: %d dBm<br>", WiFi.RSSI());
-    
-    // Show time if available
-    if (timeInitialized) {
-      response->printf("<br>🕐 <strong>Time:</strong> %s", getFormattedTime().c_str());
-      
-      if (timeControlEnabled) {
-        bool isActive = isDMXActiveTime();
-        response->printf("<br>📡 <strong>DMX Status:</strong> <span style='color: %s;'>%s</span>",
-                        isActive ? "#4CAF50" : "#f44336",
-                        isActive ? "ACTIVE" : "INACTIVE");
-        response->printf("<br>⏰ Active: %02d:%02d - %02d:%02d",
-                        dmxStartHour, dmxStartMinute, dmxEndHour, dmxEndMinute);
-      } else {
-        response->print("<br>📡 <strong>DMX Status:</strong> <span style='color: #4CAF50;'>ALWAYS ACTIVE</span>");
-      }
-    }
-  }
-  
-  response->printf("<br>Hostname: <strong>%s.local</strong>", ssid);
+  // WiFi Status anzeigen - wird dynamisch aktualisiert
+  response->print("<div id='status-box' class='info'>");
+  response->print("Loading status...");
   response->print("</div>");
   
   response->print("<div style='margin: 30px;'>");
@@ -808,6 +790,59 @@ void setup(){
   // Route for root / web page - now shows fixtures list
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
     sendFixturesPage(request);
+  });
+  
+  server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request){
+    AsyncResponseStream *response = request->beginResponseStream("application/json");
+    
+    String html = "";
+    
+    // AP is always active
+    html += "📶 <strong>Access Point Active</strong><br>";
+    html += "AP Network: " + String(ssid) + "<br>";
+    html += "AP IP: <strong>" + WiFi.softAPIP().toString() + "</strong><br>";
+    html += "AP MAC: " + WiFi.softAPmacAddress() + "<br>";
+    
+    // Show client connection if available
+    if (WiFi.getMode() == WIFI_AP_STA && WiFi.status() == WL_CONNECTED) {
+      html += "<br>📡 <strong>+ WiFi Client Connected</strong><br>";
+      html += "Network: " + WiFi.SSID() + "<br>";
+      html += "Client IP: <strong>" + WiFi.localIP().toString() + "</strong><br>";
+      html += "Client MAC: " + WiFi.macAddress() + "<br>";
+      html += "Signal: " + String(WiFi.RSSI()) + " dBm<br>";
+      
+      // Show time if available
+      if (timeInitialized) {
+        html += "<br>🕐 <strong>Time:</strong> " + getFormattedTime();
+        
+        if (timeControlEnabled) {
+          bool isActive = isDMXActiveTime();
+          html += "<br>📡 <strong>DMX Status:</strong> <span style='color: ";
+          html += isActive ? "#4CAF50" : "#f44336";
+          html += ";'>";
+          html += isActive ? "ACTIVE" : "INACTIVE";
+          html += "</span>";
+          
+          char timeStr[32];
+          sprintf(timeStr, "<br>⏰ Active: %02d:%02d - %02d:%02d",
+                  dmxStartHour, dmxStartMinute, dmxEndHour, dmxEndMinute);
+          html += timeStr;
+        } else {
+          html += "<br>📡 <strong>DMX Status:</strong> <span style='color: #4CAF50;'>ALWAYS ACTIVE</span>";
+        }
+      }
+    }
+    
+    html += "<br>Hostname: <strong>" + String(ssid) + ".local</strong>";
+    
+    // JSON response with HTML content
+    response->print("{\"html\":\"");
+    // Escape quotes in HTML
+    html.replace("\"", "\\\"");
+    response->print(html);
+    response->print("\"}");
+    
+    request->send(response);
   });
   
   server.on("/saveall", HTTP_GET, [](AsyncWebServerRequest *request){
