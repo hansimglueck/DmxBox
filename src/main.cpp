@@ -1,6 +1,7 @@
 #include "Arduino.h"
 #include <WiFi.h>
-#include <esp_wifi.h>  // Add this include at the top
+#include <esp_wifi.h>
+#include <esp_task_wdt.h>  // Add watchdog timer include
 #include <DNSServer.h>
 #include <EEPROM.h>
 #include <AsyncTCP.h>
@@ -41,8 +42,18 @@ long lastLampToggle = millis();
 #define WIFI_PASSWORD "12345678"  // Fallback if not defined in platformio.ini
 #endif
 
+#ifndef WIFI_CONNECT_SSID
+#define WIFI_CONNECT_SSID ""  // WiFi to connect to (empty = skip connection attempt)
+#endif
+
+#ifndef WIFI_CONNECT_PASSWORD
+#define WIFI_CONNECT_PASSWORD ""
+#endif
+
 const char* ssid = WIFI_SSID;
 const char* password = WIFI_PASSWORD;
+const char* connectSSID = WIFI_CONNECT_SSID;
+const char* connectPassword = WIFI_CONNECT_PASSWORD;
 
 const byte DNS_PORT = 53;
 DNSServer dnsServer;
@@ -74,6 +85,8 @@ const int output27 = 27;
 #define CHANNELS_PER_FIXTURE 16
 #define EEPROM_DMX_START 0
 #define EEPROM_FIXTURE_START 512  // Start fixtures config after DMX data
+#define EEPROM_WIFI_SSID_START 532  // Start WiFi config after fixtures (512 + 10*2)
+#define EEPROM_WIFI_PASSWORD_START 596  // 532 + 64
 
 struct Fixture {
   char name[10];
@@ -319,10 +332,12 @@ void sendFixturesPage(AsyncWebServerRequest *request) {
   response->print("<!DOCTYPE html><html>");
   response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
   response->print("<link rel=\"icon\" href=\"data:,\">");
+  response->print("<base target='_self'>");
   response->print("<style>");
   response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
   response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
   response->print("h1 { color: #4CAF50; }");
+  response->print(".info { background-color: #2a2a2a; padding: 15px; margin: 20px; border-radius: 8px; border: 1px solid #555; }");
   response->print(".fixture { margin: 20px; padding: 15px; border: 2px solid #4CAF50; background-color: #2a2a2a; border-radius: 8px; }");
   response->print(".button { background-color: #4CAF50; border: none; color: white; padding: 11px 15px;");
   response->print("text-decoration: none; font-size: 20px; margin: 8px; cursor: pointer; border-radius: 4px;}");
@@ -331,14 +346,38 @@ void sendFixturesPage(AsyncWebServerRequest *request) {
   response->print(".button-save:hover { background-color: #e68900; }");
   response->print(".button-reset { background-color: #f44336; margin: 20px; padding: 15px 30px; font-size: 24px; }");
   response->print(".button-reset:hover { background-color: #da190b; }");
+  response->print(".button-wifi { background-color: #2196F3; margin: 20px; padding: 15px 30px; font-size: 24px; }");
+  response->print(".button-wifi:hover { background-color: #0b7dda; }");
   response->print("input { font-size: 18px; padding: 8px; width: 80px; background-color: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; }");
   response->print("a { color: #4CAF50; text-decoration: none; }");
   response->print("</style></head>");
   response->print("<body><h1>DMX Fixtures</h1>");
   
+  // WiFi Status anzeigen
+  response->print("<div class='info'>");
+  
+  // AP is always active
+  response->print("📶 <strong>Access Point Active</strong><br>");
+  response->printf("AP Network: %s<br>", ssid);
+  response->printf("AP IP: <strong>%s</strong><br>", WiFi.softAPIP().toString().c_str());
+  response->printf("AP MAC: %s<br>", WiFi.softAPmacAddress().c_str());
+  
+  // Show client connection if available
+  if (WiFi.getMode() == WIFI_AP_STA && WiFi.status() == WL_CONNECTED) {
+    response->print("<br>📡 <strong>+ WiFi Client Connected</strong><br>");
+    response->printf("Network: %s<br>", WiFi.SSID().c_str());
+    response->printf("Client IP: <strong>%s</strong><br>", WiFi.localIP().toString().c_str());
+    response->printf("Client MAC: %s<br>", WiFi.macAddress().c_str());
+    response->printf("Signal: %d dBm<br>", WiFi.RSSI());
+  }
+  
+  response->printf("<br>Hostname: <strong>%s.local</strong>", ssid);
+  response->print("</div>");
+  
   response->print("<div style='margin: 30px;'>");
   response->print("<a href='/saveall'><button class='button button-save'>💾 Save All to EEPROM</button></a>");
   response->print("<a href='/resetconfirm'><button class='button button-reset'>🔄 Reset EEPROM</button></a>");
+  response->print("<a href='/wifisetup'><button class='button button-wifi'>📶 WiFi Setup</button></a>");
   response->print("</div>");
   
   for (int i = 0; i < NUM_FIXTURES; i++) {
@@ -352,7 +391,7 @@ void sendFixturesPage(AsyncWebServerRequest *request) {
   }
   
   response->print("</body></html>");
-  request->send(response);
+  request->send(response);  // DIESER AUFRUF FEHLTE!
 }
 
 class CaptiveRequestHandler : public AsyncWebHandler {
@@ -391,8 +430,8 @@ void copyDataToDMXBuffer() {
     }
   }
   
-  // Debug output every 5 seconds
-  if (millis() - lastDebug > 5000) {
+  // Debug output every 50 seconds
+  if (millis() - lastDebug > 50000) {
     lastDebug = millis();
     Serial.println("=== DMX Buffer Status ===");
     for (int i = 1; i <= min(10, CHANNELS); i++) {
@@ -443,18 +482,151 @@ void resetEEPROM() {
   Serial.println("EEPROM reset complete - All DMX channels set to 0");
 }
 
+bool connectToWiFi(const char* ssid, const char* password, int maxAttempts = 20) {
+  if (strlen(ssid) == 0) {
+    Serial.println("No WiFi SSID configured for connection");
+    return false;
+  }
+  
+  Serial.printf("Attempting to connect to WiFi: %s\n", ssid);
+  // Don't set mode here - will be set in setup
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+    
+    // Reset watchdog every 2 attempts (every ~1 second)
+    if (attempts % 2 == 0) {
+      esp_task_wdt_reset();
+    }
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi connected successfully!");
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+    return true;
+  } else {
+    Serial.println("\nWiFi connection failed!");
+    return false;
+  }
+}
+
+void saveWiFiConfig(const char* ssid, const char* password) {
+  // Save SSID (max 64 chars)
+  for (int i = 0; i < 64; i++) {
+    if (i < strlen(ssid)) {
+      EEPROM.write(EEPROM_WIFI_SSID_START + i, ssid[i]);
+    } else {
+      EEPROM.write(EEPROM_WIFI_SSID_START + i, 0);
+    }
+  }
+  
+  // Save Password (max 64 chars)
+  for (int i = 0; i < 64; i++) {
+    if (i < strlen(password)) {
+      EEPROM.write(EEPROM_WIFI_PASSWORD_START + i, password[i]);
+    } else {
+      EEPROM.write(EEPROM_WIFI_PASSWORD_START + i, 0);
+    }
+  }
+  
+  EEPROM.commit();
+  Serial.println("WiFi credentials saved to EEPROM");
+}
+
+void loadWiFiConfig(char* ssid, char* password) {
+  // Load SSID
+  for (int i = 0; i < 64; i++) {
+    ssid[i] = EEPROM.read(EEPROM_WIFI_SSID_START + i);
+    if (ssid[i] == 0) break;
+  }
+  ssid[63] = 0; // Ensure null termination
+  
+  // Load Password
+  for (int i = 0; i < 64; i++) {
+    password[i] = EEPROM.read(EEPROM_WIFI_PASSWORD_START + i);
+    if (password[i] == 0) break;
+  }
+  password[63] = 0; // Ensure null termination
+}
+
 void setup(){
   // initialize digital pin LED_BUILTIN as an output.
   Serial.begin(115200);
   delay(1000);
   Serial.println("\n\n=== DMX Box Starting ===");
-  Serial.print("setup");
-  WiFi.mode(WIFI_STA); // explicitly set mode, esp defaults to STA+AP
-  setupOTA("dmxbox", "12345678");
-
-  // initialize EEPROM with predefined size
+  
+  // Configure watchdog timer FIRST (10 seconds timeout)
+  esp_task_wdt_init(10, true);
+  esp_task_wdt_add(NULL);
+  Serial.println("Watchdog timer configured (10s timeout)");
+  
+  // initialize EEPROM with predefined size BEFORE reading WiFi config
   EEPROM.begin(1024);  // Increased size for fixture config
   Serial.println("EEPROM initialized (1024 bytes)");
+  
+  // Reset watchdog before WiFi operations
+  esp_task_wdt_reset();
+  
+  // Load WiFi config from EEPROM FIRST
+  char savedSSID[64] = {0};
+  char savedPassword[64] = {0};
+  loadWiFiConfig(savedSSID, savedPassword);
+  
+  // Start WiFi in AP_STA mode from the beginning
+  Serial.println("Starting WiFi in AP+STA Mode...");
+  WiFi.mode(WIFI_AP_STA);
+  
+  // Start AP first (always active)
+  Serial.println("Starting Access Point...");
+  WiFi.softAP(ssid, password);
+  
+  // Set WiFi TX power to maximum
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  esp_wifi_set_max_tx_power(84);
+  Serial.println("WiFi TX power set to maximum (21dBm)");
+  
+  IPAddress apIP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(apIP);
+  Serial.printf("AP MAC: %s\n", WiFi.softAPmacAddress().c_str());
+  
+  // Start DNS server for captive portal
+  dnsServer.start(DNS_PORT, "*", apIP);
+  Serial.println("DNS Server started for captive portal");
+  
+  // Try to connect to saved WiFi (STA mode in parallel)
+  bool wifiConnected = false;
+  
+  if (strlen(savedSSID) > 0) {
+    Serial.printf("Found saved WiFi config: %s\n", savedSSID);
+    wifiConnected = connectToWiFi(savedSSID, savedPassword);
+  }
+  
+  if (!wifiConnected && strlen(connectSSID) > 0) {
+    Serial.println("Trying configured WiFi from platformio.ini");
+    wifiConnected = connectToWiFi(connectSSID, connectPassword);
+  }
+  
+  esp_task_wdt_reset();  // Reset after WiFi attempt
+  
+  if (wifiConnected) {
+    Serial.println("WiFi Client Connected - Running in AP+STA Mode (Dual Mode)");
+    Serial.printf("Client IP: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("Client MAC: %s\n", WiFi.macAddress().c_str());
+  } else {
+    Serial.println("WiFi Client not connected - Running in AP-only Mode");
+  }
+  
+  // Setup OTA with hostname
+  setupOTA(ssid, password);
+  Serial.printf("Hostname: %s.local\n", ssid);
+
+  esp_task_wdt_reset();  // Reset after WiFi setup complete
 
   // Initialize SPIFFS
   if(!SPIFFS.begin(true)){
@@ -462,6 +634,8 @@ void setup(){
     return;
   }
   Serial.println("SPIFFS mounted successfully");
+
+  esp_task_wdt_reset();  // Reset after SPIFFS
 
   // DMX Setup - FIRST install driver, THEN set pins
   Serial.println("Installing DMX driver...");
@@ -484,11 +658,18 @@ void setup(){
 
   Serial.println("setup dmx complete");
 
+  esp_task_wdt_reset();  // Reset after DMX setup
+
   pinMode(2, OUTPUT);
 
   // Load all 512 DMX channels from EEPROM
   for (int i = 1; i <= 512; i++) {  
     data[i] = EEPROM.read(EEPROM_DMX_START + i);
+    
+    // Reset watchdog every 128 channels
+    if (i % 128 == 0) {
+      esp_task_wdt_reset();
+    }
   }
   Serial.println("Loaded 512 DMX channels from EEPROM");
   
@@ -498,26 +679,9 @@ void setup(){
     Serial.printf("  %s: Start Address = %d\n", fixtures[i].name, fixtures[i].startAddress);
   }
 
-  // Connect to Wi-Fi network with SSID and password
-  Serial.print("Setting AP (Access Point)…");
-  // Remove the password parameter, if you want the AP (Access Point) to be open
-
-  // config führt zum abstürzen beim hochfahren
-  //varyWiFi.softAPConfig(local_ip, gateway, subnet);
-  WiFi.softAP(ssid, password);
-  
-  // Set WiFi TX power to maximum
-  WiFi.setTxPower(WIFI_POWER_19_5dBm);  // Arduino API
-  esp_wifi_set_max_tx_power(84);        // ESP32 native API (84 = 21dBm)
-  Serial.println("WiFi TX power set to maximum (21dBm)");
-  
-  IPAddress IP = WiFi.softAPIP();
-  Serial.print("AP IP address: ");
-  Serial.println(IP);
-
-  dnsServer.start(DNS_PORT, "*", IP);
-
   Serial.println("setup ap complete");
+
+  esp_task_wdt_reset();  // Reset before setting up server routes
 
   //more handlers...
   // Route for root / web page - now shows fixtures list
@@ -536,6 +700,7 @@ void setup(){
     response->print("<!DOCTYPE html><html>");
     response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
     response->print("<link rel=\"icon\" href=\"data:,\">");
+    response->print("<base target='_self'>");  // Add this line
     response->print("<style>");
     response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
     response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
@@ -558,6 +723,195 @@ void setup(){
   server.on("/reseteeprom", HTTP_GET, [](AsyncWebServerRequest *request){
     resetEEPROM();
     request->redirect("/");
+  });
+  
+  server.on("/wifisetup", HTTP_GET, [](AsyncWebServerRequest *request){
+    // Show scanning page with auto-redirect
+    AsyncResponseStream *response = request->beginResponseStream("text/html");
+    response->print("<!DOCTYPE html><html>");
+    response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+    response->print("<meta http-equiv='refresh' content='3;url=/wifiscan'>");
+    response->print("<link rel=\"icon\" href=\"data:,\">");
+    response->print("<base target='_self'>");
+    response->print("<style>");
+    response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
+    response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
+    response->print("h1 { color: #2196F3; }");
+    response->print(".spinner { border: 8px solid #333; border-top: 8px solid #2196F3; border-radius: 50%;");
+    response->print("width: 60px; height: 60px; animation: spin 1s linear infinite; margin: 40px auto; }");
+    response->print("@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }");
+    response->print("p { color: #aaa; }");
+    response->print("</style></head>");
+    response->print("<body><h1>📶 WiFi Setup</h1>");
+    response->print("<div class='spinner'></div>");
+    response->print("<h2>Scanning for networks...</h2>");
+    response->print("<p>Please wait, this may take a few seconds.</p>");
+    response->print("</body></html>");
+    request->send(response);
+  });
+  
+  server.on("/wifiscan", HTTP_GET, [](AsyncWebServerRequest *request){
+    // Feed the watchdog before long operation
+    esp_task_wdt_reset();
+    
+    AsyncResponseStream *response = request->beginResponseStream("text/html");
+    response->print("<!DOCTYPE html><html>");
+    response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+    response->print("<link rel=\"icon\" href=\"data:,\">");
+    response->print("<base target='_self'>");
+    response->print("<style>");
+    response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
+    response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
+    response->print("h1 { color: #2196F3; }");
+    response->print(".network { margin: 15px; padding: 15px; border: 1px solid #555; background-color: #2a2a2a; border-radius: 4px; }");
+    response->print(".network:hover { background-color: #333; border-color: #2196F3; }");
+    response->print(".network a { display: block; color: #e0e0e0; text-decoration: none; }");
+    response->print(".button { background-color: #4CAF50; border: none; color: white; padding: 15px 30px;");
+    response->print("text-decoration: none; font-size: 20px; margin: 20px; cursor: pointer; border-radius: 4px; display: inline-block;}");
+    response->print("input { font-size: 18px; padding: 10px; width: 250px; background-color: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; margin: 10px; }");
+    response->print("a { color: #4CAF50; text-decoration: none; }");
+    response->print(".signal { float: right; color: #4CAF50; }");
+    response->print("</style></head>");
+    response->print("<body><h1>📶 WiFi Networks</h1>");
+    response->print("<p><a href='/'>← Back to Fixtures</a></p>");
+    
+    // Scan for networks with watchdog reset
+    response->print("<div style='margin: 30px;'>");
+    response->print("<h2>Available Networks:</h2>");
+    
+    Serial.println("Starting WiFi scan...");
+    esp_task_wdt_reset();  // Reset before scan
+    
+    // Async scan with timeout
+    int n = WiFi.scanNetworks(false, false, false, 300);  // 300ms per channel max
+    
+    esp_task_wdt_reset();  // Reset after scan
+    Serial.printf("Scan complete, found %d networks\n", n);
+    
+    if (n == 0) {
+      response->print("<p>No networks found.</p>");
+      response->print("<p><a href='/wifisetup'><button class='button'>Scan Again</button></a></p>");
+    } else {
+      for (int i = 0; i < n && i < 20; i++) {  // Limit to 20 networks
+        esp_task_wdt_reset();  // Reset for each network
+        
+        String ssid = WiFi.SSID(i);
+        int rssi = WiFi.RSSI(i);
+        String signalStrength = (rssi > -50) ? "████" : (rssi > -60) ? "███░" : (rssi > -70) ? "██░░" : "█░░░";
+        bool isOpen = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
+        
+        response->printf("<div class='network'>");
+        response->printf("<a href='/wifiselect?ssid=%s&open=%d'>", ssid.c_str(), isOpen ? 1 : 0);
+        response->printf("<span>%s</span>", ssid.c_str());
+        response->printf("<span class='signal'>%s %ddBm</span>", signalStrength.c_str(), rssi);
+        if (isOpen) response->print(" <span style='color: #ff9800;'>🔓</span>");
+        response->print("</a>");
+        response->print("</div>");
+      }
+    }
+    
+    response->print("</div>");
+    
+    // Manual entry form
+    response->print("<div style='margin: 30px;'>");
+    response->print("<h2>Manual Entry:</h2>");
+    response->print("<form action='/wifiselect' method='get'>");
+    response->print("<input type='text' name='ssid' placeholder='SSID' required><br>");
+    response->print("<input type='hidden' name='open' value='0'>");
+    response->print("<button class='button' type='submit'>Next</button>");
+    response->print("</form>");
+    response->print("</div>");
+    
+    response->print("</body></html>");
+    
+    esp_task_wdt_reset();  // Reset before sending
+    request->send(response);
+  });
+  
+  server.on("/wifiselect", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("ssid")) {
+      request->redirect("/wifisetup");
+      return;
+    }
+    
+    String selectedSSID = request->getParam("ssid")->value();
+    bool isOpen = request->hasParam("open") && request->getParam("open")->value() == "1";
+    
+    AsyncResponseStream *response = request->beginResponseStream("text/html");
+    response->print("<!DOCTYPE html><html>");
+    response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+    response->print("<link rel=\"icon\" href=\"data:,\">");
+    response->print("<base target='_self'>");
+    response->print("<style>");
+    response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
+    response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
+    response->print("h1 { color: #2196F3; }");
+    response->print(".button { background-color: #4CAF50; border: none; color: white; padding: 15px 30px;");
+    response->print("text-decoration: none; font-size: 20px; margin: 20px; cursor: pointer; border-radius: 4px;}");
+    response->print("input { font-size: 18px; padding: 10px; width: 250px; background-color: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; margin: 10px; }");
+    response->print("a { color: #4CAF50; text-decoration: none; }");
+    response->print("</style></head>");
+    response->print("<body><h1>Enter Password</h1>");
+    response->print("<p><a href='/wifisetup'>← Back to Networks</a></p>");
+    
+    response->print("<div style='margin: 30px;'>");
+    response->printf("<h2>Network: %s</h2>", selectedSSID.c_str());
+    
+    if (isOpen) {
+      response->print("<p style='color: #ff9800;'>This is an open network (no password required)</p>");
+    }
+    
+    response->print("<form action='/wificonnect' method='get'>");
+    response->printf("<input type='hidden' name='ssid' value='%s'>", selectedSSID.c_str());
+    
+    if (isOpen) {
+      response->print("<input type='hidden' name='password' value=''>");
+      response->print("<button class='button' type='submit'>Connect Now</button>");
+    } else {
+      response->print("<input type='password' name='password' placeholder='Password' required autofocus><br>");
+      response->print("<button class='button' type='submit'>Connect</button>");
+    }
+    
+    response->print("</form>");
+    response->print("</div>");
+    
+    response->print("</body></html>");
+    request->send(response);
+  });
+  
+  server.on("/wificonnect", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (request->hasParam("ssid")) {
+      String newSSID = request->getParam("ssid")->value();
+      String newPassword = request->hasParam("password") ? request->getParam("password")->value() : "";
+      
+      // Save to EEPROM
+      saveWiFiConfig(newSSID.c_str(), newPassword.c_str());
+      
+      // Send response
+      AsyncResponseStream *response = request->beginResponseStream("text/html");
+      response->print("<!DOCTYPE html><html>");
+      response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+      response->print("<link rel=\"icon\" href=\"data:,\">");
+      response->print("<base target='_self'>");
+      response->print("<style>");
+      response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
+      response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
+      response->print("h1 { color: #2196F3; }");
+      response->print("</style></head>");
+      response->print("<body><h1>✅ WiFi Configuration Saved</h1>");
+      response->printf("<p>SSID: %s</p>", newSSID.c_str());
+      response->print("<p>Device will restart in 3 seconds...</p>");
+      response->print("<p>If connection succeeds, the device will be available on your network.</p>");
+      response->print("<p>If connection fails, AP mode will start again.</p>");
+      response->print("</body></html>");
+      request->send(response);
+      
+      // Restart after 3 seconds
+      delay(3000);
+      ESP.restart();
+    } else {
+      request->redirect("/wifisetup");
+    }
   });
   
   server.on("/setaddress", HTTP_GET, [](AsyncWebServerRequest *request){
@@ -588,6 +942,7 @@ void setup(){
     response->print("<!DOCTYPE html><html>");
     response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
     response->print("<link rel=\"icon\" href=\"data:,\">");
+    response->print("<base target='_self'>");  // Add this line
     response->print("<style>");
     response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
     response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
@@ -644,6 +999,7 @@ void setup(){
     response->print("<!DOCTYPE html><html>");
     response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
     response->print("<link rel=\"icon\" href=\"data:,\">");
+    response->print("<base target='_self'>");  // Add this line
     response->print("<style>");
     response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
     response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
@@ -693,22 +1049,22 @@ void setup(){
 
   server.begin();
   Serial.println("=== Setup Complete - Web Server Started ===\n");
+  
+  esp_task_wdt_reset();  // Final reset after setup
 }
-
-// void copyDMXToOutput(void) {
-//   xSemaphoreTake( ESP32DMX.lxDataLock, portMAX_DELAY );
-//   for (int i=1; i<DMX_MAX_FRAME; i++) {
-//       ESP32DMX.setSlot(i , data[i]);
-//    }
-//    xSemaphoreGive( ESP32DMX.lxDataLock );
-// }
 
 void loop(){
   static unsigned long loopCounter = 0;
   static unsigned long lastLoopDebug = 0;
   
+  // Reset watchdog at start of loop
+  esp_task_wdt_reset();
+  
   processOTA();
+  
+  // Always process DNS requests (AP is always active)
   dnsServer.processNextRequest();
+  
   copyDataToDMXBuffer();
   
   dmx_wait_sent(dmxPort, DMX_TIMEOUT_TICK);
