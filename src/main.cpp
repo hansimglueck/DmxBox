@@ -1,7 +1,7 @@
 #include "Arduino.h"
 #include <WiFi.h>
 #include <esp_wifi.h>
-#include <esp_task_wdt.h>  // Add watchdog timer include
+#include <esp_task_wdt.h>
 #include <DNSServer.h>
 #include <EEPROM.h>
 #include <AsyncTCP.h>
@@ -9,6 +9,7 @@
 #include "SPIFFS.h"
 #include <esp_dmx.h>
 #include <OTAWrapper.h>
+#include <time.h>  // Add time library
 
 // Fallback if DMX_DEFAULT_INTR_FLAGS is not defined in esp_dmx library
 #ifndef DMX_DEFAULT_INTR_FLAGS
@@ -84,9 +85,14 @@ const int output27 = 27;
 #define NUM_FIXTURES 10
 #define CHANNELS_PER_FIXTURE 16
 #define EEPROM_DMX_START 0
-#define EEPROM_FIXTURE_START 512  // Start fixtures config after DMX data
-#define EEPROM_WIFI_SSID_START 532  // Start WiFi config after fixtures (512 + 10*2)
-#define EEPROM_WIFI_PASSWORD_START 596  // 532 + 64
+#define EEPROM_FIXTURE_START 512
+#define EEPROM_WIFI_SSID_START 532
+#define EEPROM_WIFI_PASSWORD_START 596
+#define EEPROM_TIME_START_HOUR 660  // 532 + 64 + 64
+#define EEPROM_TIME_START_MINUTE 661
+#define EEPROM_TIME_END_HOUR 662
+#define EEPROM_TIME_END_MINUTE 663
+#define EEPROM_TIME_ENABLED 664
 
 struct Fixture {
   char name[10];
@@ -300,6 +306,99 @@ double values[CHANNELS];
 
 String lampState;
 
+// NTP Time settings - MUST BE BEFORE sendFixturesPage()
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 3600;  // GMT+1 for Central Europe
+const int daylightOffset_sec = 3600;  // Daylight saving time
+bool timeInitialized = false;
+
+// Time control settings
+int dmxStartHour = 0;
+int dmxStartMinute = 0;
+int dmxEndHour = 0;
+int dmxEndMinute = 0;
+bool timeControlEnabled = false;
+
+String getFormattedTime() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    return "Time not set";
+  }
+  
+  char timeStr[64];
+  strftime(timeStr, sizeof(timeStr), "%d.%m.%Y %H:%M:%S", &timeinfo);
+  return String(timeStr);
+}
+
+void initTime() {
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("Initializing NTP time sync...");
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    
+    // Wait up to 5 seconds for time sync
+    int timeout = 0;
+    struct tm timeinfo;
+    while (!getLocalTime(&timeinfo) && timeout < 10) {
+      delay(500);
+      Serial.print(".");
+      timeout++;
+    }
+    
+    if (getLocalTime(&timeinfo)) {
+      timeInitialized = true;
+      Serial.println("\nTime synchronized: " + getFormattedTime());
+    } else {
+      Serial.println("\nFailed to sync time");
+    }
+  }
+}
+
+bool isDMXActiveTime() {
+  if (!timeInitialized || !timeControlEnabled) {
+    return true;  // Always active if no time control
+  }
+  
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    return true;  // Default to active if time not available
+  }
+  
+  int currentMinutes = timeinfo.tm_hour * 60 + timeinfo.tm_min;
+  int startMinutes = dmxStartHour * 60 + dmxStartMinute;
+  int endMinutes = dmxEndHour * 60 + dmxEndMinute;
+  
+  // Handle overnight periods (e.g., 22:00 to 06:00)
+  if (startMinutes <= endMinutes) {
+    return currentMinutes >= startMinutes && currentMinutes < endMinutes;
+  } else {
+    return currentMinutes >= startMinutes || currentMinutes < endMinutes;
+  }
+}
+
+void loadTimeControl() {
+  dmxStartHour = EEPROM.read(EEPROM_TIME_START_HOUR);
+  dmxStartMinute = EEPROM.read(EEPROM_TIME_START_MINUTE);
+  dmxEndHour = EEPROM.read(EEPROM_TIME_END_HOUR);
+  dmxEndMinute = EEPROM.read(EEPROM_TIME_END_MINUTE);
+  timeControlEnabled = EEPROM.read(EEPROM_TIME_ENABLED) == 1;
+  
+  // Validate ranges
+  if (dmxStartHour > 23) dmxStartHour = 0;
+  if (dmxStartMinute > 59) dmxStartMinute = 0;
+  if (dmxEndHour > 23) dmxEndHour = 0;
+  if (dmxEndMinute > 59) dmxEndMinute = 0;
+}
+
+void saveTimeControl() {
+  EEPROM.write(EEPROM_TIME_START_HOUR, dmxStartHour);
+  EEPROM.write(EEPROM_TIME_START_MINUTE, dmxStartMinute);
+  EEPROM.write(EEPROM_TIME_END_HOUR, dmxEndHour);
+  EEPROM.write(EEPROM_TIME_END_MINUTE, dmxEndMinute);
+  EEPROM.write(EEPROM_TIME_ENABLED, timeControlEnabled ? 1 : 0);
+  EEPROM.commit();
+  Serial.println("Time control settings saved");
+}
+
 // Replaces placeholder with Lamp state value
 String processor(const String& var){
   Serial.println(var);
@@ -317,16 +416,6 @@ String processor(const String& var){
 }
 
 
-/* AsyncWebServerResponse *response = request->beginChunkedResponse("text/plain", [](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
-  //Write up to "maxLen" bytes into "buffer" and return the amount written.
-  //index equals the amount of bytes that have been already sent
-  //You will be asked for more data until 0 is returned
-  //Keep in mind that you can not delay or yield waiting for more data!
-  return mySource.read(buffer, maxLen);
-}, processor);
-response->addHeader("Server","ESP Async Web Server");
-request->send(response);
- */
 void sendFixturesPage(AsyncWebServerRequest *request) {
   AsyncResponseStream *response = request->beginResponseStream("text/html");
   response->print("<!DOCTYPE html><html>");
@@ -369,6 +458,22 @@ void sendFixturesPage(AsyncWebServerRequest *request) {
     response->printf("Client IP: <strong>%s</strong><br>", WiFi.localIP().toString().c_str());
     response->printf("Client MAC: %s<br>", WiFi.macAddress().c_str());
     response->printf("Signal: %d dBm<br>", WiFi.RSSI());
+    
+    // Show time if available
+    if (timeInitialized) {
+      response->printf("<br>🕐 <strong>Time:</strong> %s", getFormattedTime().c_str());
+      
+      if (timeControlEnabled) {
+        bool isActive = isDMXActiveTime();
+        response->printf("<br>📡 <strong>DMX Status:</strong> <span style='color: %s;'>%s</span>",
+                        isActive ? "#4CAF50" : "#f44336",
+                        isActive ? "ACTIVE" : "INACTIVE");
+        response->printf("<br>⏰ Active: %02d:%02d - %02d:%02d",
+                        dmxStartHour, dmxStartMinute, dmxEndHour, dmxEndMinute);
+      } else {
+        response->print("<br>📡 <strong>DMX Status:</strong> <span style='color: #4CAF50;'>ALWAYS ACTIVE</span>");
+      }
+    }
   }
   
   response->printf("<br>Hostname: <strong>%s.local</strong>", ssid);
@@ -378,6 +483,7 @@ void sendFixturesPage(AsyncWebServerRequest *request) {
   response->print("<a href='/saveall'><button class='button button-save'>💾 Save All to EEPROM</button></a>");
   response->print("<a href='/resetconfirm'><button class='button button-reset'>🔄 Reset EEPROM</button></a>");
   response->print("<a href='/wifisetup'><button class='button button-wifi'>📶 WiFi Setup</button></a>");
+  response->print("<a href='/timesetup'><button class='button button-wifi'>⏰ Time Setup</button></a>");
   response->print("</div>");
   
   for (int i = 0; i < NUM_FIXTURES; i++) {
@@ -412,12 +518,18 @@ public:
 void copyDataToDMXBuffer() {
   static unsigned long lastDebug = 0;
   
+  bool dmxActive = isDMXActiveTime();
+  
   for (int i=0; i<=511; i++) {  
-    dmxBuffer[i+1] = data[i+1];
+    if (dmxActive) {
+      dmxBuffer[i+1] = data[i+1];
+    } else {
+      dmxBuffer[i+1] = 0;  // All channels to 0 when inactive
+    }
   }
   
   // if data[ctrlChannel] == lampOnValue then toggle dmxBuffer[ctrlChannel] every 6 seconds between 0 and lampOnValue
-  if (data[controlChannel] == lampOnValue) {
+  if (dmxActive && data[controlChannel] == lampOnValue) {
     if (millis() - lastLampToggle > 6000) {
       lastLampToggle = millis();
       if (dmxBuffer[controlChannel] == 0) {
@@ -566,8 +678,14 @@ void setup(){
   Serial.println("Watchdog timer configured (10s timeout)");
   
   // initialize EEPROM with predefined size BEFORE reading WiFi config
-  EEPROM.begin(1024);  // Increased size for fixture config
+  EEPROM.begin(1024);
   Serial.println("EEPROM initialized (1024 bytes)");
+  
+  // Load time control settings
+  loadTimeControl();
+  Serial.printf("Time control: %s, Active: %02d:%02d - %02d:%02d\n",
+                timeControlEnabled ? "ENABLED" : "DISABLED",
+                dmxStartHour, dmxStartMinute, dmxEndHour, dmxEndMinute);
   
   // Reset watchdog before WiFi operations
   esp_task_wdt_reset();
@@ -618,6 +736,9 @@ void setup(){
     Serial.println("WiFi Client Connected - Running in AP+STA Mode (Dual Mode)");
     Serial.printf("Client IP: %s\n", WiFi.localIP().toString().c_str());
     Serial.printf("Client MAC: %s\n", WiFi.macAddress().c_str());
+    
+    // Initialize time via NTP
+    initTime();
   } else {
     Serial.println("WiFi Client not connected - Running in AP-only Mode");
   }
@@ -914,6 +1035,80 @@ void setup(){
     }
   });
   
+  server.on("/timesetup", HTTP_GET, [](AsyncWebServerRequest *request){
+    AsyncResponseStream *response = request->beginResponseStream("text/html");
+    response->print("<!DOCTYPE html><html>");
+    response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+    response->print("<link rel=\"icon\" href=\"data:,\">");
+    response->print("<base target='_self'>");
+    response->print("<style>");
+    response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
+    response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
+    response->print("h1 { color: #2196F3; }");
+    response->print(".button { background-color: #4CAF50; border: none; color: white; padding: 15px 30px;");
+    response->print("text-decoration: none; font-size: 20px; margin: 20px; cursor: pointer; border-radius: 4px;}");
+    response->print("input[type='number'] { font-size: 18px; padding: 10px; width: 80px; background-color: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; margin: 5px; }");
+    response->print("input[type='checkbox'] { width: 30px; height: 30px; margin: 10px; }");
+    response->print("label { display: block; margin: 20px; }");
+    response->print("a { color: #4CAF50; text-decoration: none; }");
+    response->print("</style></head>");
+    response->print("<body><h1>⏰ Time Control Setup</h1>");
+    response->print("<p><a href='/'>← Back to Fixtures</a></p>");
+    
+    response->print("<form action='/timesave' method='get'>");
+    response->print("<div style='margin: 30px;'>");
+    
+    response->print("<label>");
+    response->print("<input type='checkbox' name='enabled' value='1'");
+    if (timeControlEnabled) response->print(" checked");
+    response->print("> Enable Time Control");
+    response->print("</label>");
+    
+    response->print("<h2>DMX Active Time</h2>");
+    response->print("<label>Start Time:");
+    response->printf("<input type='number' name='start_h' value='%d' min='0' max='23'>", dmxStartHour);
+    response->print(":");
+    response->printf("<input type='number' name='start_m' value='%d' min='0' max='59'>", dmxStartMinute);
+    response->print("</label>");
+    
+    response->print("<label>End Time:");
+    response->printf("<input type='number' name='end_h' value='%d' min='0' max='23'>", dmxEndHour);
+    response->print(":");
+    response->printf("<input type='number' name='end_m' value='%d' min='0' max='59'>", dmxEndMinute);
+    response->print("</label>");
+    
+    response->print("<p style='color: #aaa;'>DMX output will be active between Start and End time.<br>");
+    response->print("Outside this time, all DMX channels will be set to 0.</p>");
+    
+    response->print("<button class='button' type='submit'>Save Settings</button>");
+    response->print("</div>");
+    response->print("</form>");
+    
+    response->print("</body></html>");
+    request->send(response);
+  });
+  
+  server.on("/timesave", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (request->hasParam("start_h") && request->hasParam("start_m") &&
+        request->hasParam("end_h") && request->hasParam("end_m")) {
+      
+      dmxStartHour = request->getParam("start_h")->value().toInt();
+      dmxStartMinute = request->getParam("start_m")->value().toInt();
+      dmxEndHour = request->getParam("end_h")->value().toInt();
+      dmxEndMinute = request->getParam("end_m")->value().toInt();
+      timeControlEnabled = request->hasParam("enabled");
+      
+      // Validate
+      if (dmxStartHour > 23) dmxStartHour = 23;
+      if (dmxStartMinute > 59) dmxStartMinute = 59;
+      if (dmxEndHour > 23) dmxEndHour = 23;
+      if (dmxEndMinute > 59) dmxEndMinute = 59;
+      
+      saveTimeControl();
+    }
+    request->redirect("/");
+  });
+  
   server.on("/setaddress", HTTP_GET, [](AsyncWebServerRequest *request){
     if (request->hasParam("id") && request->hasParam("addr")) {
       int id = request->getParam("id")->value().toInt();
@@ -1056,6 +1251,7 @@ void setup(){
 void loop(){
   static unsigned long loopCounter = 0;
   static unsigned long lastLoopDebug = 0;
+  static unsigned long lastTimeSync = 0;
   
   // Reset watchdog at start of loop
   esp_task_wdt_reset();
@@ -1073,12 +1269,21 @@ void loop(){
   
   loopCounter++;
   
+  // Re-sync time every hour if connected
+  if (WiFi.status() == WL_CONNECTED && (millis() - lastTimeSync > 3600000)) {
+    lastTimeSync = millis();
+    initTime();
+  }
+  
   // Debug output every 10 seconds
   if (millis() - lastLoopDebug > 10000) {
     lastLoopDebug = millis();
     Serial.printf("Loop count: %lu, Uptime: %lu ms\n", loopCounter, millis());
     Serial.printf("DMX sent on port %d, packet size: %d\n", dmxPort, DMX_PACKET_SIZE);
+    if (timeInitialized) {
+      Serial.printf("Current time: %s\n", getFormattedTime().c_str());
+    }
   }
   
-  delay(10); // Small delay to prevent watchdog issues
+  delay(10);
 }
