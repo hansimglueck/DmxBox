@@ -1,7 +1,6 @@
 #include "Arduino.h"
-// #include <LXESP32DMX.h>
-// #include "esp_task_wdt.h"
 #include <WiFi.h>
+#include <esp_wifi.h>  // Add this include at the top
 #include <DNSServer.h>
 #include <EEPROM.h>
 #include <AsyncTCP.h>
@@ -249,8 +248,8 @@ int tiltFineChannel=28;
 // int tiltFineChannel=4;
 
 
-/*
-//Channels
+/*/
+/Channels
 #define CHANNELS 20
 const char* ssid     = "SchleppiDMX";
 String channel_names[CHANNELS] = {
@@ -318,14 +317,29 @@ request->send(response);
 void sendFixturesPage(AsyncWebServerRequest *request) {
   AsyncResponseStream *response = request->beginResponseStream("text/html");
   response->print("<!DOCTYPE html><html>");
-  response->print("<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+  response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
   response->print("<link rel=\"icon\" href=\"data:,\">");
-  response->print("<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
-  response->print(".fixture { margin: 20px; padding: 15px; border: 2px solid #4CAF50; }");
+  response->print("<style>");
+  response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
+  response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
+  response->print("h1 { color: #4CAF50; }");
+  response->print(".fixture { margin: 20px; padding: 15px; border: 2px solid #4CAF50; background-color: #2a2a2a; border-radius: 8px; }");
   response->print(".button { background-color: #4CAF50; border: none; color: white; padding: 11px 15px;");
-  response->print("text-decoration: none; font-size: 20px; margin: 8px; cursor: pointer;}");
-  response->print("input { font-size: 18px; padding: 8px; width: 80px; }</style></head>");
+  response->print("text-decoration: none; font-size: 20px; margin: 8px; cursor: pointer; border-radius: 4px;}");
+  response->print(".button:hover { background-color: #45a049; }");
+  response->print(".button-save { background-color: #ff9800; margin: 20px; padding: 15px 30px; font-size: 24px; }");
+  response->print(".button-save:hover { background-color: #e68900; }");
+  response->print(".button-reset { background-color: #f44336; margin: 20px; padding: 15px 30px; font-size: 24px; }");
+  response->print(".button-reset:hover { background-color: #da190b; }");
+  response->print("input { font-size: 18px; padding: 8px; width: 80px; background-color: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; }");
+  response->print("a { color: #4CAF50; text-decoration: none; }");
+  response->print("</style></head>");
   response->print("<body><h1>DMX Fixtures</h1>");
+  
+  response->print("<div style='margin: 30px;'>");
+  response->print("<a href='/saveall'><button class='button button-save'>💾 Save All to EEPROM</button></a>");
+  response->print("<a href='/resetconfirm'><button class='button button-reset'>🔄 Reset EEPROM</button></a>");
+  response->print("</div>");
   
   for (int i = 0; i < NUM_FIXTURES; i++) {
     response->printf("<div class='fixture'>");
@@ -408,11 +422,25 @@ void saveFixtureAddresses() {
 }
 
 void saveEEPROM() {
-  for (int i=0; i<=CHANNELS; i++) {  
-    EEPROM.write(EEPROM_DMX_START + i + 1, data[i+1]);
+  // Save all 512 DMX channels
+  for (int i = 1; i <= 512; i++) {  
+    EEPROM.write(EEPROM_DMX_START + i, data[i]);
   }
   EEPROM.commit();
-  Serial.println("State saved in flash memory"); 
+  Serial.println("All 512 DMX channels saved to EEPROM"); 
+}
+
+void resetEEPROM() {
+  Serial.println("Resetting EEPROM - Setting all DMX channels to 0...");
+  
+  // Reset all 512 DMX channels to 0
+  for (int i = 1; i <= 512; i++) {  
+    data[i] = 0;
+    EEPROM.write(EEPROM_DMX_START + i, 0);
+  }
+  
+  EEPROM.commit();
+  Serial.println("EEPROM reset complete - All DMX channels set to 0");
 }
 
 void setup(){
@@ -458,10 +486,11 @@ void setup(){
 
   pinMode(2, OUTPUT);
 
-  for (int i=0; i<=CHANNELS; i++) {  
-    data[i+1] = EEPROM.read(EEPROM_DMX_START + i + 1);
+  // Load all 512 DMX channels from EEPROM
+  for (int i = 1; i <= 512; i++) {  
+    data[i] = EEPROM.read(EEPROM_DMX_START + i);
   }
-  Serial.printf("Loaded %d channels from EEPROM\n", CHANNELS);
+  Serial.println("Loaded 512 DMX channels from EEPROM");
   
   initFixtures();
   Serial.println("Fixtures initialized:");
@@ -477,6 +506,11 @@ void setup(){
   //varyWiFi.softAPConfig(local_ip, gateway, subnet);
   WiFi.softAP(ssid, password);
   
+  // Set WiFi TX power to maximum
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);  // Arduino API
+  esp_wifi_set_max_tx_power(84);        // ESP32 native API (84 = 21dBm)
+  Serial.println("WiFi TX power set to maximum (21dBm)");
+  
   IPAddress IP = WiFi.softAPIP();
   Serial.print("AP IP address: ");
   Serial.println(IP);
@@ -489,6 +523,41 @@ void setup(){
   // Route for root / web page - now shows fixtures list
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
     sendFixturesPage(request);
+  });
+  
+  server.on("/saveall", HTTP_GET, [](AsyncWebServerRequest *request){
+    saveEEPROM();
+    saveFixtureAddresses();
+    request->redirect("/");
+  });
+  
+  server.on("/resetconfirm", HTTP_GET, [](AsyncWebServerRequest *request){
+    AsyncResponseStream *response = request->beginResponseStream("text/html");
+    response->print("<!DOCTYPE html><html>");
+    response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+    response->print("<link rel=\"icon\" href=\"data:,\">");
+    response->print("<style>");
+    response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
+    response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
+    response->print("h1 { color: #f44336; }");
+    response->print(".button { background-color: #4CAF50; border: none; color: white; padding: 15px 30px;");
+    response->print("text-decoration: none; font-size: 24px; margin: 20px; cursor: pointer; display: inline-block; border-radius: 4px;}");
+    response->print(".button:hover { background-color: #45a049; }");
+    response->print(".button-danger { background-color: #f44336; }");
+    response->print(".button-danger:hover { background-color: #da190b; }");
+    response->print("p { color: #e0e0e0; }");
+    response->print("</style></head>");
+    response->print("<body><h1>⚠️ Confirm Reset</h1>");
+    response->print("<p style='font-size: 24px; margin: 40px;'>Reset ALL DMX channels to 0?<br>This cannot be undone!</p>");
+    response->print("<a href='/reseteeprom'><button class='button button-danger'>Yes, Reset Everything</button></a><br>");
+    response->print("<a href='/'><button class='button'>Cancel</button></a>");
+    response->print("</body></html>");
+    request->send(response);
+  });
+  
+  server.on("/reseteeprom", HTTP_GET, [](AsyncWebServerRequest *request){
+    resetEEPROM();
+    request->redirect("/");
   });
   
   server.on("/setaddress", HTTP_GET, [](AsyncWebServerRequest *request){
@@ -517,11 +586,17 @@ void setup(){
     
     AsyncResponseStream *response = request->beginResponseStream("text/html");
     response->print("<!DOCTYPE html><html>");
-    response->print("<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+    response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
     response->print("<link rel=\"icon\" href=\"data:,\">");
-    response->print("<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
-    response->print(".channel { margin: 10px; padding: 10px; border: 1px solid #ccc; }");
-    response->print("a { text-decoration: none; color: #4CAF50; }</style></head>");
+    response->print("<style>");
+    response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
+    response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
+    response->print("h1, h2 { color: #4CAF50; }");
+    response->print(".channel { margin: 10px; padding: 10px; border: 1px solid #555; background-color: #2a2a2a; border-radius: 4px; }");
+    response->print(".channel:hover { background-color: #333; }");
+    response->print("a { text-decoration: none; color: #4CAF50; }");
+    response->print("p { color: #aaa; }");
+    response->print("</style></head>");
     response->printf("<body><h1>%s - Channels</h1>", fixtures[fixtureId].name);
     response->print("<p><a href='/'>← Back to Fixtures</a></p>");
     
@@ -567,13 +642,19 @@ void setup(){
     
     AsyncResponseStream *response = request->beginResponseStream("text/html");
     response->print("<!DOCTYPE html><html>");
-    response->print("<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+    response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
     response->print("<link rel=\"icon\" href=\"data:,\">");
-    response->print("<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
+    response->print("<style>");
+    response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
+    response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
+    response->print("h1, h2 { color: #4CAF50; }");
     response->print(".button { background-color: #4CAF50; border: none; color: white; padding: 15px 20px;");
-    response->print("text-decoration: none; font-size: 20px; margin: 5px; cursor: pointer; display: inline-block; min-width: 80px;}");
-    response->print(".button:active { background-color: #45a049; }");
-    response->print("a { text-decoration: none; }</style></head>");
+    response->print("text-decoration: none; font-size: 20px; margin: 5px; cursor: pointer; display: inline-block; min-width: 80px; border-radius: 4px;}");
+    response->print(".button:hover { background-color: #45a049; }");
+    response->print(".button:active { background-color: #3d8b40; }");
+    response->print("a { text-decoration: none; color: #4CAF50; }");
+    response->print("p { color: #aaa; }");
+    response->print("</style></head>");
     response->printf("<body><h1>%s - Channel %d</h1>", fixtures[fixtureId].name, channelOffset + 1);
     response->printf("<h2>DMX Channel: %d</h2>", dmxChannel);
     response->printf("<h2>Value: %d</h2>", data[dmxChannel]);
@@ -600,10 +681,6 @@ void setup(){
   server.on("/save", HTTP_GET, [](AsyncWebServerRequest *request){
     saveEEPROM();
     request->redirect("/");
-  });
-  
-  server.on("/channels", HTTP_GET, [](AsyncWebServerRequest *request){
-    // ...existing code for old channel interface...
   });
   
   // Route to load style.css file
