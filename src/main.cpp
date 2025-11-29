@@ -16,11 +16,18 @@
 #define DMX_DEFAULT_INTR_FLAGS 0
 #endif
 
+// DMX Pin Configuration - can be overridden in platformio.ini
+#ifndef DMX_DIRECTION_PIN
+#define DMX_DIRECTION_PIN 15
+#endif
 
-#define DMX_DIRECTION_PIN 15 
-// #define DMX_DIRECTION_PIN 2 //pappbecher
-#define DMX_SERIAL_OUTPUT_PIN 17
-#define DMX_SERIAL_INPUT_PIN 16
+#ifndef DMX_SERIAL_OUTPUT_PIN
+#define DMX_SERIAL_OUTPUT_PIN 17  // TX - ESP32 default
+#endif
+
+#ifndef DMX_SERIAL_INPUT_PIN
+#define DMX_SERIAL_INPUT_PIN 16   // RX - ESP32 default
+#endif
 
 // int transmitPin = 17;
 // int receivePin = 16;
@@ -584,6 +591,10 @@ bool connectToWiFi(const char* ssid, const char* password, int maxAttempts = 20)
   
   Serial.printf("Attempting to connect to WiFi: %s\n", ssid);
   // Don't set mode here - will be set in setup
+  
+  // ESP32-C3 needs a small delay before WiFi.begin()
+  delay(100);
+  
   WiFi.begin(ssid, password);
   
   int attempts = 0;
@@ -593,9 +604,11 @@ bool connectToWiFi(const char* ssid, const char* password, int maxAttempts = 20)
     attempts++;
     
     // Reset watchdog every 2 attempts (every ~1 second)
-    if (attempts % 2 == 0) {
-      esp_task_wdt_reset();
-    }
+    #ifdef ESP32_DUAL_CORE
+      if (attempts % 2 == 0) {
+        esp_task_wdt_reset();
+      }
+    #endif
   }
   
   if (WiFi.status() == WL_CONNECTED) {
@@ -646,6 +659,26 @@ void loadWiFiConfig(char* ssid, char* password) {
     if (password[i] == 0) break;
   }
   password[63] = 0; // Ensure null termination
+  
+  // Validate SSID - check for uninitialized EEPROM (0xFF) or non-printable characters
+  bool ssidValid = true;
+  int ssidLen = strlen(ssid);
+  if (ssidLen == 0 || ssid[0] == (char)0xFF) {
+    ssidValid = false;
+  } else {
+    for (int i = 0; i < ssidLen; i++) {
+      if ((unsigned char)ssid[i] == 0xFF || ssid[i] < 32 || ssid[i] > 126) {
+        ssidValid = false;
+        break;
+      }
+    }
+  }
+  
+  if (!ssidValid) {
+    Serial.println("WARNING: EEPROM WiFi config corrupted or uninitialized - resetting to defaults");
+    ssid[0] = 0;
+    password[0] = 0;
+  }
 }
 
 void setup(){
@@ -654,10 +687,22 @@ void setup(){
   delay(1000);
   Serial.println("\n\n=== DMX Box Starting ===");
   
-  // Configure watchdog timer FIRST (10 seconds timeout)
-  esp_task_wdt_init(10, true);
-  esp_task_wdt_add(NULL);
-  Serial.println("Watchdog timer configured (10s timeout)");
+  // Configure watchdog timer FIRST (10 seconds timeout) - only for ESP32 dual-core
+  #ifdef ESP32_DUAL_CORE
+    esp_task_wdt_init(10, true);
+    esp_task_wdt_add(NULL);
+    Serial.println("Watchdog timer configured (10s timeout)");
+  #else
+    Serial.println("ESP32-C3: Watchdog disabled for stability");
+  #endif
+  
+  // Disable Core 0 WDT only on dual-core ESP32
+  #ifdef ESP32_DUAL_CORE
+    Serial.println("ESP32 dual-core - will disable Core 0 WDT");
+    disableCore0WDT();
+  #else
+    Serial.println("Single-core chip - Core 0 WDT remains active");
+  #endif
   
   // initialize EEPROM with predefined size BEFORE reading WiFi config
   EEPROM.begin(1024);
@@ -670,7 +715,9 @@ void setup(){
                 dmxStartHour, dmxStartMinute, dmxEndHour, dmxEndMinute);
   
   // Reset watchdog before WiFi operations
-  esp_task_wdt_reset();
+  #ifdef ESP32_DUAL_CORE
+    esp_task_wdt_reset();
+  #endif
   
   // Load WiFi config from EEPROM FIRST
   char savedSSID[64] = {0};
@@ -712,7 +759,9 @@ void setup(){
     wifiConnected = connectToWiFi(connectSSID, connectPassword);
   }
   
-  esp_task_wdt_reset();  // Reset after WiFi attempt
+  #ifdef ESP32_DUAL_CORE
+    esp_task_wdt_reset();  // Reset after WiFi attempt
+  #endif
   
   if (wifiConnected) {
     Serial.println("WiFi Client Connected - Running in AP+STA Mode (Dual Mode)");
@@ -729,7 +778,9 @@ void setup(){
   setupOTA(ssid, password);
   Serial.printf("Hostname: %s.local\n", ssid);
 
-  esp_task_wdt_reset();  // Reset after WiFi setup complete
+  #ifdef ESP32_DUAL_CORE
+    esp_task_wdt_reset();  // Reset after WiFi setup complete
+  #endif
 
   // Initialize SPIFFS
   if(!SPIFFS.begin(true)){
@@ -738,30 +789,38 @@ void setup(){
   }
   Serial.println("SPIFFS mounted successfully");
 
-  esp_task_wdt_reset();  // Reset after SPIFFS
+  #ifdef ESP32_DUAL_CORE
+    esp_task_wdt_reset();  // Reset after SPIFFS
+  #endif
 
-  // DMX Setup - FIRST install driver, THEN set pins
-  Serial.println("Installing DMX driver...");
-  dmx_config_t config = DMX_CONFIG_DEFAULT;
-  esp_err_t err = dmx_driver_install(dmxPort, &config, DMX_DEFAULT_INTR_FLAGS);
-  if (err == ESP_OK) {
-    Serial.printf("DMX driver installed successfully on port %d\n", dmxPort);
-  } else {
-    Serial.printf("ERROR: DMX driver installation failed with code %d\n", err);
-  }
+  // DMX Setup - IMPORTANT: Set pins BEFORE installing driver!
+  Serial.println("Cleaning up any existing DMX driver...");
+  dmx_driver_delete(dmxPort);  // Safe to call even if driver doesn't exist
+  delay(100);  // Brief delay to ensure cleanup completes
   
   Serial.printf("Setting DMX pins: TX=%d, RX=%d, DIR=%d\n", 
                 DMX_SERIAL_OUTPUT_PIN, DMX_SERIAL_INPUT_PIN, DMX_DIRECTION_PIN);
-  err = dmx_set_pin(dmxPort, DMX_SERIAL_OUTPUT_PIN, DMX_SERIAL_INPUT_PIN, DMX_DIRECTION_PIN);
-  if (err == ESP_OK) {
-    Serial.println("DMX pins set successfully");
+  esp_err_t err = dmx_set_pin(dmxPort, DMX_SERIAL_OUTPUT_PIN, DMX_SERIAL_INPUT_PIN, DMX_DIRECTION_PIN);
+  if (err != ESP_OK) {
+    Serial.printf("ERROR: DMX pin setup failed with code %d - DMX functionality disabled\n", err);
   } else {
-    Serial.printf("ERROR: DMX pin setup failed with code %d\n", err);
+    Serial.println("DMX pins set successfully");
+    
+    Serial.printf("Installing DMX driver on port %d...\n", dmxPort);
+    dmx_config_t config = DMX_CONFIG_DEFAULT;
+    err = dmx_driver_install(dmxPort, &config, DMX_DEFAULT_INTR_FLAGS);
+    if (err == ESP_OK) {
+      Serial.printf("✓ DMX driver installed successfully on port %d\n", dmxPort);
+    } else {
+      Serial.printf("✗ ERROR: DMX driver installation failed with code %d - DMX functionality disabled\n", err);
+      Serial.println("Web interface will continue to work for configuration");
+    }
   }
-
   Serial.println("setup dmx complete");
 
-  esp_task_wdt_reset();  // Reset after DMX setup
+  #ifdef ESP32_DUAL_CORE
+    esp_task_wdt_reset();  // Reset after DMX setup
+  #endif
 
   pinMode(2, OUTPUT);
 
@@ -770,9 +829,11 @@ void setup(){
     data[i] = EEPROM.read(EEPROM_DMX_START + i);
     
     // Reset watchdog every 128 channels
-    if (i % 128 == 0) {
-      esp_task_wdt_reset();
-    }
+    #ifdef ESP32_DUAL_CORE
+      if (i % 128 == 0) {
+        esp_task_wdt_reset();
+      }
+    #endif
   }
   Serial.println("Loaded 512 DMX channels from EEPROM");
   
@@ -784,7 +845,9 @@ void setup(){
 
   Serial.println("setup ap complete");
 
-  esp_task_wdt_reset();  // Reset before setting up server routes
+  #ifdef ESP32_DUAL_CORE
+    esp_task_wdt_reset();  // Reset before setting up server routes
+  #endif
 
   //more handlers...
   // Route for root / web page - now shows fixtures list
@@ -908,7 +971,9 @@ void setup(){
   
   server.on("/wifiscan", HTTP_GET, [](AsyncWebServerRequest *request){
     // Feed the watchdog before long operation
-    esp_task_wdt_reset();
+    #ifdef ESP32_DUAL_CORE
+      esp_task_wdt_reset();
+    #endif
     
     AsyncResponseStream *response = request->beginResponseStream("text/html");
     response->print("<!DOCTYPE html><html>");
@@ -936,12 +1001,16 @@ void setup(){
     response->print("<h2>Available Networks:</h2>");
     
     Serial.println("Starting WiFi scan...");
-    esp_task_wdt_reset();  // Reset before scan
+    #ifdef ESP32_DUAL_CORE
+      esp_task_wdt_reset();  // Reset before scan
+    #endif
     
     // Async scan with timeout
     int n = WiFi.scanNetworks(false, false, false, 300);  // 300ms per channel max
     
-    esp_task_wdt_reset();  // Reset after scan
+    #ifdef ESP32_DUAL_CORE
+      esp_task_wdt_reset();  // Reset after scan
+    #endif
     Serial.printf("Scan complete, found %d networks\n", n);
     
     if (n == 0) {
@@ -949,7 +1018,9 @@ void setup(){
       response->print("<p><a href='/wifisetup'><button class='button'>Scan Again</button></a></p>");
     } else {
       for (int i = 0; i < n && i < 20; i++) {  // Limit to 20 networks
-        esp_task_wdt_reset();  // Reset for each network
+        #ifdef ESP32_DUAL_CORE
+          esp_task_wdt_reset();  // Reset for each network
+        #endif
         
         String ssid = WiFi.SSID(i);
         int rssi = WiFi.RSSI(i);
@@ -980,7 +1051,9 @@ void setup(){
     
     response->print("</body></html>");
     
-    esp_task_wdt_reset();  // Reset before sending
+    #ifdef ESP32_DUAL_CORE
+      esp_task_wdt_reset();  // Reset before sending
+    #endif
     request->send(response);
   });
   
@@ -1280,7 +1353,9 @@ void setup(){
   server.begin();
   Serial.println("=== Setup Complete - Web Server Started ===\n");
   
-  esp_task_wdt_reset();  // Final reset after setup
+  #ifdef ESP32_DUAL_CORE
+    esp_task_wdt_reset();  // Final reset after setup
+  #endif
 }
 
 void loop(){
@@ -1289,7 +1364,9 @@ void loop(){
   static unsigned long lastTimeSync = 0;
   
   // Reset watchdog at start of loop
-  esp_task_wdt_reset();
+  #ifdef ESP32_DUAL_CORE
+    esp_task_wdt_reset();
+  #endif
   
   processOTA();
   

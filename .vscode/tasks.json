@@ -1,0 +1,10 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Upload to ESP32-C3",
+			"type": "shell",
+			"command": "platformio run --target upload --environment esp32-c3-devkitm-1"
+		}
+	]
+}
