@@ -32,7 +32,7 @@
 // int transmitPin = 17;
 // int receivePin = 16;
 // int enablePin = 21;
-dmx_port_t dmxPort = 1;
+dmx_port_t dmxPort = DMX_NUM_0;
 byte data[DMX_PACKET_SIZE];
 byte dmxBuffer[DMX_PACKET_SIZE];
 unsigned long lastUpdate = millis();
@@ -100,6 +100,8 @@ const int output27 = 27;
 #define EEPROM_TIME_END_HOUR 662
 #define EEPROM_TIME_END_MINUTE 663
 #define EEPROM_TIME_ENABLED 664
+#define EEPROM_WEEKDAY_TIME_START 665
+#define EEPROM_WEEKDAY_TIME_ENABLED 693
 
 struct Fixture {
   char name[10];
@@ -319,12 +321,15 @@ const long gmtOffset_sec = 3600;  // GMT+1 for Central Europe
 const int daylightOffset_sec = 3600;  // Daylight saving time
 bool timeInitialized = false;
 
-// Time control settings
-int dmxStartHour = 0;
-int dmxStartMinute = 0;
-int dmxEndHour = 0;
-int dmxEndMinute = 0;
+// Time control settings - Weekday arrays (0=Monday, 1=Tuesday, ..., 6=Sunday)
+uint8_t dmxWeekdayStartHour[7] = {0, 0, 0, 0, 0, 0, 0};
+uint8_t dmxWeekdayStartMinute[7] = {0, 0, 0, 0, 0, 0, 0};
+uint8_t dmxWeekdayEndHour[7] = {0, 0, 0, 0, 0, 0, 0};
+uint8_t dmxWeekdayEndMinute[7] = {0, 0, 0, 0, 0, 0, 0};
 bool timeControlEnabled = false;
+
+// Weekday names for display
+const char* weekdayNames[7] = {"Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"};
 
 String getFormattedTime() {
   struct tm timeinfo;
@@ -370,9 +375,12 @@ bool isDMXActiveTime() {
     return true;  // Default to active if time not available
   }
   
+  // Map tm_wday (0=Sunday, 1=Monday, ..., 6=Saturday) to our array (0=Monday, ..., 6=Sunday)
+  int weekdayIndex = (timeinfo.tm_wday + 6) % 7;
+  
   int currentMinutes = timeinfo.tm_hour * 60 + timeinfo.tm_min;
-  int startMinutes = dmxStartHour * 60 + dmxStartMinute;
-  int endMinutes = dmxEndHour * 60 + dmxEndMinute;
+  int startMinutes = dmxWeekdayStartHour[weekdayIndex] * 60 + dmxWeekdayStartMinute[weekdayIndex];
+  int endMinutes = dmxWeekdayEndHour[weekdayIndex] * 60 + dmxWeekdayEndMinute[weekdayIndex];
   
   // Handle overnight periods (e.g., 22:00 to 06:00)
   if (startMinutes <= endMinutes) {
@@ -383,25 +391,35 @@ bool isDMXActiveTime() {
 }
 
 void loadTimeControl() {
-  dmxStartHour = EEPROM.read(EEPROM_TIME_START_HOUR);
-  dmxStartMinute = EEPROM.read(EEPROM_TIME_START_MINUTE);
-  dmxEndHour = EEPROM.read(EEPROM_TIME_END_HOUR);
-  dmxEndMinute = EEPROM.read(EEPROM_TIME_END_MINUTE);
-  timeControlEnabled = EEPROM.read(EEPROM_TIME_ENABLED) == 1;
+  // Load weekday-specific time control (28 bytes for 7 days × 4 values)
+  for (int day = 0; day < 7; day++) {
+    int addr = EEPROM_WEEKDAY_TIME_START + (day * 4);
+    dmxWeekdayStartHour[day] = EEPROM.read(addr);
+    dmxWeekdayStartMinute[day] = EEPROM.read(addr + 1);
+    dmxWeekdayEndHour[day] = EEPROM.read(addr + 2);
+    dmxWeekdayEndMinute[day] = EEPROM.read(addr + 3);
+    
+    // Validate values
+    if (dmxWeekdayStartHour[day] > 23) dmxWeekdayStartHour[day] = 0;
+    if (dmxWeekdayStartMinute[day] > 59) dmxWeekdayStartMinute[day] = 0;
+    if (dmxWeekdayEndHour[day] > 23) dmxWeekdayEndHour[day] = 0;
+    if (dmxWeekdayEndMinute[day] > 59) dmxWeekdayEndMinute[day] = 0;
+  }
   
-  // Validate ranges
-  if (dmxStartHour > 23) dmxStartHour = 0;
-  if (dmxStartMinute > 59) dmxStartMinute = 0;
-  if (dmxEndHour > 23) dmxEndHour = 0;
-  if (dmxEndMinute > 59) dmxEndMinute = 0;
+  timeControlEnabled = EEPROM.read(EEPROM_WEEKDAY_TIME_ENABLED) == 1;
 }
 
 void saveTimeControl() {
-  EEPROM.write(EEPROM_TIME_START_HOUR, dmxStartHour);
-  EEPROM.write(EEPROM_TIME_START_MINUTE, dmxStartMinute);
-  EEPROM.write(EEPROM_TIME_END_HOUR, dmxEndHour);
-  EEPROM.write(EEPROM_TIME_END_MINUTE, dmxEndMinute);
-  EEPROM.write(EEPROM_TIME_ENABLED, timeControlEnabled ? 1 : 0);
+  // Save weekday-specific time control (28 bytes for 7 days × 4 values)
+  for (int day = 0; day < 7; day++) {
+    int addr = EEPROM_WEEKDAY_TIME_START + (day * 4);
+    EEPROM.write(addr, dmxWeekdayStartHour[day]);
+    EEPROM.write(addr + 1, dmxWeekdayStartMinute[day]);
+    EEPROM.write(addr + 2, dmxWeekdayEndHour[day]);
+    EEPROM.write(addr + 3, dmxWeekdayEndMinute[day]);
+  }
+  
+  EEPROM.write(EEPROM_WEEKDAY_TIME_ENABLED, timeControlEnabled ? 1 : 0);
   EEPROM.commit();
   Serial.println("Time control settings saved");
 }
@@ -710,9 +728,8 @@ void setup(){
   
   // Load time control settings
   loadTimeControl();
-  Serial.printf("Time control: %s, Active: %02d:%02d - %02d:%02d\n",
-                timeControlEnabled ? "ENABLED" : "DISABLED",
-                dmxStartHour, dmxStartMinute, dmxEndHour, dmxEndMinute);
+  Serial.printf("Time control: %s (weekday-based schedules loaded)\n",
+                timeControlEnabled ? "ENABLED" : "DISABLED");
   
   // Reset watchdog before WiFi operations
   #ifdef ESP32_DUAL_CORE
@@ -886,10 +903,17 @@ void setup(){
           html += isActive ? "ACTIVE" : "INACTIVE";
           html += "</span>";
           
-          char timeStr[32];
-          sprintf(timeStr, "<br>⏰ Active: %02d:%02d - %02d:%02d",
-                  dmxStartHour, dmxStartMinute, dmxEndHour, dmxEndMinute);
-          html += timeStr;
+          // Show current weekday and today's schedule
+          struct tm timeinfo;
+          if (getLocalTime(&timeinfo)) {
+            int weekdayIndex = (timeinfo.tm_wday + 6) % 7;
+            char scheduleStr[64];
+            sprintf(scheduleStr, "<br>📅 %s: %02d:%02d - %02d:%02d",
+                    weekdayNames[weekdayIndex],
+                    dmxWeekdayStartHour[weekdayIndex], dmxWeekdayStartMinute[weekdayIndex],
+                    dmxWeekdayEndHour[weekdayIndex], dmxWeekdayEndMinute[weekdayIndex]);
+            html += scheduleStr;
+          }
         } else {
           html += "<br>📡 <strong>DMX Status:</strong> <span style='color: #4CAF50;'>ALWAYS ACTIVE</span>";
         }
@@ -1151,45 +1175,68 @@ void setup(){
     response->print("<base target='_self'>");
     response->print("<style>");
     response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
-    response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
+    response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 18px;}");
     response->print("h1 { color: #2196F3; }");
+    response->print("h3 { color: #4CAF50; margin-top: 0; }");
     response->print(".button { background-color: #4CAF50; border: none; color: white; padding: 15px 30px;");
-    response->print("text-decoration: none; font-size: 20px; margin: 20px; cursor: pointer; border-radius: 4px;}");
-    response->print("input[type='number'] { font-size: 18px; padding: 10px; width: 80px; background-color: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; margin: 5px; }");
-    response->print("input[type='checkbox'] { width: 30px; height: 30px; margin: 10px; }");
-    response->print("label { display: block; margin: 20px; }");
+    response->print("text-decoration: none; font-size: 18px; margin: 10px; cursor: pointer; border-radius: 4px;}");
+    response->print(".day-section { border: 1px solid #555; padding: 15px; margin: 15px auto; border-radius: 5px; max-width: 600px; background-color: #2a2a2a; }");
+    response->print("input[type='number'] { font-size: 16px; padding: 8px; width: 60px; background-color: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; margin: 3px; }");
+    response->print("input[type='checkbox'] { width: 25px; height: 25px; margin: 10px; }");
+    response->print("label { display: inline-block; margin: 10px; }");
     response->print("a { color: #4CAF50; text-decoration: none; }");
-    response->print("</style></head>");
-    response->print("<body><h1>⏰ Time Control Setup</h1>");
-    response->print("<p><a href='/'>← Back to Fixtures</a></p>");
+    response->print("</style>");
+    response->print("<script>");
+    response->print("function setAllDays() {");
+    response->print("  var h0 = document.querySelector('[name=day0_start_h]').value;");
+    response->print("  var m0 = document.querySelector('[name=day0_start_m]').value;");
+    response->print("  var h1 = document.querySelector('[name=day0_end_h]').value;");
+    response->print("  var m1 = document.querySelector('[name=day0_end_m]').value;");
+    response->print("  for (var i = 1; i < 7; i++) {");
+    response->print("    document.querySelector('[name=day' + i + '_start_h]').value = h0;");
+    response->print("    document.querySelector('[name=day' + i + '_start_m]').value = m0;");
+    response->print("    document.querySelector('[name=day' + i + '_end_h]').value = h1;");
+    response->print("    document.querySelector('[name=day' + i + '_end_m]').value = m1;");
+    response->print("  }");
+    response->print("}");
+    response->print("</script></head>");
+    response->print("<body><h1>⏰ Wochentag Zeit-Steuerung</h1>");
+    response->print("<p><a href='/'>← Zurück</a></p>");
+    
+    response->print("<div style='margin: 20px;'>");
+    response->print("<label>");
+    response->print("<input type='checkbox' id='enabled_cb' name='enabled' value='1'");
+    if (timeControlEnabled) response->print(" checked");
+    response->print("> Zeit-Steuerung aktiviert");
+    response->print("</label>");
+    response->print("<br><button class='button' onclick='setAllDays()'>Alle Tage auf gleiche Zeit setzen</button>");
+    response->print("</div>");
     
     response->print("<form action='/timesave' method='get'>");
-    response->print("<div style='margin: 30px;'>");
     
-    response->print("<label>");
-    response->print("<input type='checkbox' name='enabled' value='1'");
-    if (timeControlEnabled) response->print(" checked");
-    response->print("> Enable Time Control");
-    response->print("</label>");
+    for (int day = 0; day < 7; day++) {
+      response->print("<div class='day-section'>");
+      response->printf("<h3>%s</h3>", weekdayNames[day]);
+      response->print("<label>Start:");
+      response->printf("<input type='number' name='day%d_start_h' value='%d' min='0' max='23'>", day, dmxWeekdayStartHour[day]);
+      response->print(":");
+      response->printf("<input type='number' name='day%d_start_m' value='%d' min='0' max='59'>", day, dmxWeekdayStartMinute[day]);
+      response->print("</label>");
+      response->print("<label>Ende:");
+      response->printf("<input type='number' name='day%d_end_h' value='%d' min='0' max='23'>", day, dmxWeekdayEndHour[day]);
+      response->print(":");
+      response->printf("<input type='number' name='day%d_end_m' value='%d' min='0' max='59'>", day, dmxWeekdayEndMinute[day]);
+      response->print("</label>");
+      response->print("</div>");
+    }
     
-    response->print("<h2>DMX Active Time</h2>");
-    response->print("<label>Start Time:");
-    response->printf("<input type='number' name='start_h' value='%d' min='0' max='23'>", dmxStartHour);
-    response->print(":");
-    response->printf("<input type='number' name='start_m' value='%d' min='0' max='59'>", dmxStartMinute);
-    response->print("</label>");
+    response->print("<input type='hidden' name='enabled' id='enabled_val' value='0'>");
+    response->print("<script>document.getElementById('enabled_cb').onchange = function() { document.getElementById('enabled_val').value = this.checked ? '1' : '0'; };</script>");
     
-    response->print("<label>End Time:");
-    response->printf("<input type='number' name='end_h' value='%d' min='0' max='23'>", dmxEndHour);
-    response->print(":");
-    response->printf("<input type='number' name='end_m' value='%d' min='0' max='59'>", dmxEndMinute);
-    response->print("</label>");
+    response->print("<p style='color: #aaa;'>DMX wird nur während der eingestellten Zeiten aktiv sein.<br>");
+    response->print("Außerhalb dieser Zeiten werden alle DMX-Kanäle auf 0 gesetzt.</p>");
     
-    response->print("<p style='color: #aaa;'>DMX output will be active between Start and End time.<br>");
-    response->print("Outside this time, all DMX channels will be set to 0.</p>");
-    
-    response->print("<button class='button' type='submit'>Save Settings</button>");
-    response->print("</div>");
+    response->print("<button class='button' type='submit'>Speichern</button>");
     response->print("</form>");
     
     response->print("</body></html>");
@@ -1197,23 +1244,33 @@ void setup(){
   });
   
   server.on("/timesave", HTTP_GET, [](AsyncWebServerRequest *request){
-    if (request->hasParam("start_h") && request->hasParam("start_m") &&
-        request->hasParam("end_h") && request->hasParam("end_m")) {
+    // Parse all 7 weekdays
+    for (int day = 0; day < 7; day++) {
+      String prefix = "day" + String(day);
       
-      dmxStartHour = request->getParam("start_h")->value().toInt();
-      dmxStartMinute = request->getParam("start_m")->value().toInt();
-      dmxEndHour = request->getParam("end_h")->value().toInt();
-      dmxEndMinute = request->getParam("end_m")->value().toInt();
-      timeControlEnabled = request->hasParam("enabled");
+      if (request->hasParam(prefix + "_start_h")) {
+        dmxWeekdayStartHour[day] = request->getParam(prefix + "_start_h")->value().toInt();
+      }
+      if (request->hasParam(prefix + "_start_m")) {
+        dmxWeekdayStartMinute[day] = request->getParam(prefix + "_start_m")->value().toInt();
+      }
+      if (request->hasParam(prefix + "_end_h")) {
+        dmxWeekdayEndHour[day] = request->getParam(prefix + "_end_h")->value().toInt();
+      }
+      if (request->hasParam(prefix + "_end_m")) {
+        dmxWeekdayEndMinute[day] = request->getParam(prefix + "_end_m")->value().toInt();
+      }
       
-      // Validate
-      if (dmxStartHour > 23) dmxStartHour = 23;
-      if (dmxStartMinute > 59) dmxStartMinute = 59;
-      if (dmxEndHour > 23) dmxEndHour = 23;
-      if (dmxEndMinute > 59) dmxEndMinute = 59;
-      
-      saveTimeControl();
+      // Validate ranges
+      if (dmxWeekdayStartHour[day] > 23) dmxWeekdayStartHour[day] = 23;
+      if (dmxWeekdayStartMinute[day] > 59) dmxWeekdayStartMinute[day] = 59;
+      if (dmxWeekdayEndHour[day] > 23) dmxWeekdayEndHour[day] = 23;
+      if (dmxWeekdayEndMinute[day] > 59) dmxWeekdayEndMinute[day] = 59;
     }
+    
+    timeControlEnabled = request->hasParam("enabled") && request->getParam("enabled")->value() == "1";
+    
+    saveTimeControl();
     request->redirect("/");
   });
   
