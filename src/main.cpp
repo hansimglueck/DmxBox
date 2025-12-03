@@ -743,7 +743,7 @@ void setup(){
   // DMX Setup - FIRST install driver, THEN set pins
   Serial.println("Installing DMX driver...");
   dmx_config_t config = DMX_CONFIG_DEFAULT;
-  esp_err_t err = dmx_driver_install(dmxPort, &config, DMX_DEFAULT_INTR_FLAGS);
+  esp_err_t err = dmx_driver_install(dmxPort, &config, NULL, 0);
   if (err == ESP_OK) {
     Serial.printf("DMX driver installed successfully on port %d\n", dmxPort);
   } else {
@@ -1300,7 +1300,7 @@ void loop(){
   
   dmx_wait_sent(dmxPort, DMX_TIMEOUT_TICK);
   dmx_write(dmxPort, dmxBuffer, DMX_PACKET_SIZE);
-  dmx_send(dmxPort, DMX_PACKET_SIZE);
+  dmx_send(dmxPort);
   
   loopCounter++;
   
