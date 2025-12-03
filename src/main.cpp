@@ -16,16 +16,21 @@
 #define DMX_DEFAULT_INTR_FLAGS 0
 #endif
 
-
-#define DMX_DIRECTION_PIN 15 
-// #define DMX_DIRECTION_PIN 2 //pappbecher
+// DMX configuration from platformio.ini
+#ifndef DMX_SERIAL_OUTPUT_PIN
 #define DMX_SERIAL_OUTPUT_PIN 17
+#endif
+#ifndef DMX_SERIAL_INPUT_PIN
 #define DMX_SERIAL_INPUT_PIN 16
+#endif
+#ifndef DMX_DIRECTION_PIN
+#define DMX_DIRECTION_PIN 15
+#endif
+#ifndef DMX_PORT
+#define DMX_PORT 1
+#endif
 
-// int transmitPin = 17;
-// int receivePin = 16;
-// int enablePin = 21;
-dmx_port_t dmxPort = 1;
+dmx_port_t dmxPort = DMX_PORT;
 byte data[DMX_PACKET_SIZE];
 byte dmxBuffer[DMX_PACKET_SIZE];
 unsigned long lastUpdate = millis();
