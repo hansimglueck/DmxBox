@@ -1377,9 +1377,31 @@ void setup(){
     response->print(".button-save { background-color: #4CAF50; }");
     response->print(".button-reset { background-color: #f44336; }");
     response->print("a { color: #4CAF50; text-decoration: none; }");
-    response->print("</style></head>");
+    response->print(".button-preset { background-color: #555; padding: 8px 14px; font-size: 16px; margin: 4px; }");
+    response->print(".button-preset:hover { background-color: #777; }");
+    response->print("</style>");
+    response->print("<script>");
+    response->print("const presets={");
+    response->print("'SharpyPlus':['Cyna','Magenta','Yellow','Colour1','Colour2','Colour3','Strobe','Dimmer','Dimmer Fine','Gobo','Animation','Ani Rot','Gobo2','Gobo2 Rot','Rot Fine','4Prism'],");
+    response->print("'Beam330':['Color','Strobe','Dimmer','Gobo','Gobo Rot','Prism','Prism Rot','Zoom1','Zoom2','Pan','Pan Fine','Tilt','Tilt Fine','Focus','Frost','Lamp Ctrl'],");
+    response->print("'Beam230':['Pan','Tilt','Pan Fine','Tilt Fine','Dimmer','Strobe','Frost','Focus','Gobo','Gobo Shake','Color','??','Prism','Prism Rot','??','??'],");
+    response->print("'Beam230neu':['Color','Strobe','Dimmer','Gobo','Prism','Prism Rot','PrismRot2','Bunt','Focus','Pan','Pan Fine','Tilt','Tilt Fine','PT Time','Reset','Lamp Ctrl'],");
+    response->print("'Beam230v21':['Pan','Tilt','Pan Fine','Tilt Fine','XY Speed','Zoom','Strobe','Dimmer','Color','Gobo','Gobo2','Gobo Rot','Focus','Prism','Prism Rot','Reset']");
+    response->print("};");
+    response->print("function applyPreset(name){const p=presets[name];for(let i=0;i<16;i++){const el=document.querySelector('input[name=\"n'+i+'\"]');if(el)el.value=p[i]||'';}};");
+    response->print("</script>");
+    response->print("</head>");
     response->printf("<body><h1>%s – Channel Names</h1>", fixtures[fixtureId].name);
     response->printf("<p><a href='/fixture?id=%d'>← Back</a></p>", fixtureId);
+
+    response->print("<div style='margin:10px;'>");
+    response->print("<span style='color:#aaa;font-size:16px;'>Preset: </span>");
+    response->print("<button class='button button-preset' onclick='applyPreset(\"SharpyPlus\")'>SharpyPlus</button>");
+    response->print("<button class='button button-preset' onclick='applyPreset(\"Beam330\")'>Beam330</button>");
+    response->print("<button class='button button-preset' onclick='applyPreset(\"Beam230\")'>Beam230</button>");
+    response->print("<button class='button button-preset' onclick='applyPreset(\"Beam230neu\")'>Beam230neu</button>");
+    response->print("<button class='button button-preset' onclick='applyPreset(\"Beam230v21\")'>Beam230v21</button>");
+    response->print("</div>");
 
     response->printf("<form action='/savechannelnames' method='get'>");
     response->printf("<input type='hidden' name='id' value='%d'>", fixtureId);
