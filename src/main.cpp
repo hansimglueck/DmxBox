@@ -92,6 +92,9 @@ const int output27 = 27;
 #define EEPROM_TIME_END_HOUR 662
 #define EEPROM_TIME_END_MINUTE 663
 #define EEPROM_TIME_ENABLED 664
+#define EEPROM_CHANNEL_NAMES_START 665
+#define FIXTURE_CHANNEL_NAME_LEN 12
+// 10 fixtures * 16 channels * 12 bytes = 1920 bytes -> end at 2585
 
 struct Fixture {
   char name[10];
@@ -99,6 +102,7 @@ struct Fixture {
 };
 
 Fixture fixtures[NUM_FIXTURES];
+char fixtureChannelNames[NUM_FIXTURES][CHANNELS_PER_FIXTURE][FIXTURE_CHANNEL_NAME_LEN];
 
 String channel_names[CHANNELS] = {
   "Cyna", //1  
@@ -630,6 +634,38 @@ void resetEEPROM() {
   Serial.println("EEPROM reset complete - All DMX channels set to 0");
 }
 
+void resetChannelNames(int fixtureId) {
+  for (int ch = 0; ch < CHANNELS_PER_FIXTURE; ch++) {
+    snprintf(fixtureChannelNames[fixtureId][ch], FIXTURE_CHANNEL_NAME_LEN, "Ch %d", ch + 1);
+  }
+}
+
+void loadChannelNames() {
+  for (int fix = 0; fix < NUM_FIXTURES; fix++) {
+    for (int ch = 0; ch < CHANNELS_PER_FIXTURE; ch++) {
+      int addr = EEPROM_CHANNEL_NAMES_START + (fix * CHANNELS_PER_FIXTURE + ch) * FIXTURE_CHANNEL_NAME_LEN;
+      char* name = fixtureChannelNames[fix][ch];
+      for (int i = 0; i < FIXTURE_CHANNEL_NAME_LEN; i++) {
+        name[i] = EEPROM.read(addr + i);
+      }
+      name[FIXTURE_CHANNEL_NAME_LEN - 1] = 0;
+      if (name[0] == 0 || (uint8_t)name[0] == 0xFF) {
+        resetChannelNames(fix);
+      }
+    }
+  }
+}
+
+void saveChannelNames(int fixtureId) {
+  for (int ch = 0; ch < CHANNELS_PER_FIXTURE; ch++) {
+    int addr = EEPROM_CHANNEL_NAMES_START + (fixtureId * CHANNELS_PER_FIXTURE + ch) * FIXTURE_CHANNEL_NAME_LEN;
+    for (int i = 0; i < FIXTURE_CHANNEL_NAME_LEN; i++) {
+      EEPROM.write(addr + i, fixtureChannelNames[fixtureId][ch][i]);
+    }
+  }
+  EEPROM.commit();
+}
+
 bool connectToWiFi(const char* ssid, const char* password, int maxAttempts = 20) {
   if (strlen(ssid) == 0) {
     Serial.println("No WiFi SSID configured for connection");
@@ -730,8 +766,8 @@ void setup(){
   Serial.println("Watchdog timer configured (10s timeout)");
   
   // initialize EEPROM with predefined size BEFORE reading WiFi config
-  EEPROM.begin(1024);
-  Serial.println("EEPROM initialized (1024 bytes)");
+  EEPROM.begin(3000);
+  Serial.println("EEPROM initialized (3000 bytes)");
   
   // Load time control settings
   loadTimeControl();
@@ -815,10 +851,8 @@ void setup(){
   Serial.println("Loaded 512 DMX channels from EEPROM");
   
   initFixtures();
+  loadChannelNames();
   Serial.println("Fixtures initialized:");
-  for (int i = 0; i < NUM_FIXTURES; i++) {
-    Serial.printf("  %s: Start Address = %d\n", fixtures[i].name, fixtures[i].startAddress);
-  }
 
   Serial.println("setup ap complete");
 
@@ -1209,25 +1243,32 @@ void setup(){
     response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
     response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
     response->print("h1, h2 { color: #4CAF50; }");
-    response->print(".channel { margin: 10px; padding: 10px; border: 1px solid #555; background-color: #2a2a2a; border-radius: 4px; }");
+    response->print(".channel { margin: 10px; padding: 10px; border: 1px solid #555; background-color: #2a2a2a; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; }");
     response->print(".channel:hover { background-color: #333; }");
+    response->print(".channel a { text-decoration: none; color: #4CAF50; flex: 1; }");
+    response->print(".ch-name { color: #aaa; font-size: 16px; min-width: 80px; text-align: left; }");
+    response->print(".ch-val { font-weight: bold; min-width: 40px; text-align: right; }");
+    response->print(".button { background-color: #4CAF50; border: none; color: white; padding: 11px 15px; font-size: 18px; margin: 8px; cursor: pointer; border-radius: 4px; }");
+    response->print(".button-edit { background-color: #2196F3; }");
     response->print("a { text-decoration: none; color: #4CAF50; }");
     response->print("p { color: #aaa; }");
     response->print("</style></head>");
-    response->printf("<body><h1>%s - Channels</h1>", fixtures[fixtureId].name);
-    response->print("<p><a href='/'>← Back to Fixtures</a></p>");
-    
+    response->printf("<body><h1>%s</h1>", fixtures[fixtureId].name);
+    response->print("<p><a href='/'>← Back</a></p>");
+    response->printf("<a href='/fixturenames?id=%d'><button class='button button-edit'>Edit Channel Names</button></a>", fixtureId);
+
     uint16_t startAddr = fixtures[fixtureId].startAddress;
     for (int i = 0; i < CHANNELS_PER_FIXTURE; i++) {
       uint16_t dmxChannel = startAddr + i;
       if (dmxChannel > 0 && dmxChannel <= 512) {
         response->printf("<div class='channel'>");
-        response->printf("<a href='/channel?fix=%d&ch=%d'>Channel %d (DMX %d): %d</a>",
-                        fixtureId, i, i + 1, dmxChannel, data[dmxChannel]);
+        response->printf("<span class='ch-name'>%s</span>", fixtureChannelNames[fixtureId][i]);
+        response->printf("<a href='/channel?fix=%d&ch=%d'>DMX %d</a>", fixtureId, i, dmxChannel);
+        response->printf("<span class='ch-val'>%d</span>", data[dmxChannel]);
         response->printf("</div>");
       }
     }
-    
+
     response->print("</body></html>");
     request->send(response);
   });
@@ -1249,34 +1290,56 @@ void setup(){
     
     uint16_t dmxChannel = fixtures[fixtureId].startAddress + channelOffset;
     if (dmxChannel > 0 && dmxChannel <= 512) {
-      if (delta != 0) {
-        int newVal = data[dmxChannel] + delta;
-        if (newVal < 0) newVal = 0;
-        if (newVal > 255) newVal = 255;
+      if (request->hasParam("val")) {
+        int newVal = constrain(request->getParam("val")->value().toInt(), 0, 255);
+        data[dmxChannel] = newVal;
+      } else if (delta != 0) {
+        int newVal = constrain((int)data[dmxChannel] + delta, 0, 255);
         data[dmxChannel] = newVal;
       }
     }
-    
+
+    if (request->hasParam("name")) {
+      String newName = request->getParam("name")->value();
+      strncpy(fixtureChannelNames[fixtureId][channelOffset], newName.c_str(), FIXTURE_CHANNEL_NAME_LEN - 1);
+      fixtureChannelNames[fixtureId][channelOffset][FIXTURE_CHANNEL_NAME_LEN - 1] = 0;
+      saveChannelNames(fixtureId);
+    }
+
     AsyncResponseStream *response = request->beginResponseStream("text/html");
     response->print("<!DOCTYPE html><html>");
     response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-    response->print("<link rel=\"icon\" href=\"data:,\">");
-    response->print("<base target='_self'>");  // Add this line
+    response->print("<link rel=\"icon\" href=\"data:,\"><base target='_self'>");
     response->print("<style>");
     response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
     response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
     response->print("h1, h2 { color: #4CAF50; }");
     response->print(".button { background-color: #4CAF50; border: none; color: white; padding: 15px 20px;");
-    response->print("text-decoration: none; font-size: 20px; margin: 5px; cursor: pointer; display: inline-block; min-width: 80px; border-radius: 4px;}");
+    response->print("font-size: 20px; margin: 5px; cursor: pointer; display: inline-block; min-width: 80px; border-radius: 4px;}");
     response->print(".button:hover { background-color: #45a049; }");
-    response->print(".button:active { background-color: #3d8b40; }");
+    response->print(".button-name { background-color: #2196F3; padding: 10px 15px; font-size: 18px; }");
+    response->print("input[type=text] { font-size: 18px; padding: 8px; width: 180px; background-color: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; }");
     response->print("a { text-decoration: none; color: #4CAF50; }");
     response->print("p { color: #aaa; }");
+    response->print("h1 { cursor: pointer; }");
+    response->print("h1:hover { color: #45a049; }");
     response->print("</style></head>");
-    response->printf("<body><h1>%s - Channel %d</h1>", fixtures[fixtureId].name, channelOffset + 1);
-    response->printf("<h2>DMX Channel: %d</h2>", dmxChannel);
-    response->printf("<h2>Value: %d</h2>", data[dmxChannel]);
-    response->printf("<p><a href='/fixture?id=%d'>← Back to Channels</a></p>", fixtureId);
+    response->printf("<body><h1 onclick=\"document.getElementById('rf').style.display='block';document.getElementById('rn').select();\">%s</h1>", fixtureChannelNames[fixtureId][channelOffset]);
+    response->printf("<form id='rf' action='/channel' method='get' style='display:none; margin:10px;'>");
+    response->printf("<input type='hidden' name='fix' value='%d'>", fixtureId);
+    response->printf("<input type='hidden' name='ch' value='%d'>", channelOffset);
+    response->printf("<input id='rn' type='text' name='name' value='%s' maxlength='%d'>", fixtureChannelNames[fixtureId][channelOffset], FIXTURE_CHANNEL_NAME_LEN - 1);
+    response->print("<button class='button button-name' type='submit'>OK</button>");
+    response->print("</form>");
+    response->printf("<h2>DMX %d</h2>", dmxChannel);
+    response->printf("<h2 onclick=\"document.getElementById('vf').style.display='block';document.getElementById('vn').select();\" style='cursor:pointer;'>%d</h2>", data[dmxChannel]);
+    response->printf("<form id='vf' action='/channel' method='get' style='display:none; margin:10px;'>");
+    response->printf("<input type='hidden' name='fix' value='%d'>", fixtureId);
+    response->printf("<input type='hidden' name='ch' value='%d'>", channelOffset);
+    response->printf("<input id='vn' type='number' name='val' value='%d' min='0' max='255' style='font-size:18px;padding:8px;width:100px;background-color:#333;color:#e0e0e0;border:1px solid #555;border-radius:4px;'>", data[dmxChannel]);
+    response->print("<button class='button button-name' type='submit'>OK</button>");
+    response->print("</form>");
+    response->printf("<p><a href='/fixture?id=%d'>← Back</a></p>", fixtureId);
     
     response->print("<div style='margin: 30px;'>");
     response->printf("<a href='/channel?fix=%d&ch=%d&delta=-255'><button class='button'>0</button></a>", fixtureId, channelOffset);
@@ -1295,6 +1358,70 @@ void setup(){
     request->send(response);
   });
   
+  server.on("/fixturenames", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("id")) { request->redirect("/"); return; }
+    int fixtureId = request->getParam("id")->value().toInt();
+    if (fixtureId < 0 || fixtureId >= NUM_FIXTURES) { request->redirect("/"); return; }
+
+    AsyncResponseStream *response = request->beginResponseStream("text/html");
+    response->print("<!DOCTYPE html><html>");
+    response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+    response->print("<link rel=\"icon\" href=\"data:,\"><base target='_self'>");
+    response->print("<style>");
+    response->print("body { background-color: #1a1a1a; color: #e0e0e0; font-family: Helvetica, Arial, sans-serif; text-align: center; font-size: 20px; }");
+    response->print("h1 { color: #2196F3; }");
+    response->print(".row { display: flex; align-items: center; justify-content: center; margin: 8px; gap: 10px; }");
+    response->print(".ch-num { color: #aaa; width: 50px; text-align: right; font-size: 16px; }");
+    response->print("input { font-size: 18px; padding: 8px; width: 200px; background-color: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; }");
+    response->print(".button { border: none; color: white; padding: 12px 25px; font-size: 20px; margin: 10px; cursor: pointer; border-radius: 4px; }");
+    response->print(".button-save { background-color: #4CAF50; }");
+    response->print(".button-reset { background-color: #f44336; }");
+    response->print("a { color: #4CAF50; text-decoration: none; }");
+    response->print("</style></head>");
+    response->printf("<body><h1>%s – Channel Names</h1>", fixtures[fixtureId].name);
+    response->printf("<p><a href='/fixture?id=%d'>← Back</a></p>", fixtureId);
+
+    response->printf("<form action='/savechannelnames' method='get'>");
+    response->printf("<input type='hidden' name='id' value='%d'>", fixtureId);
+    for (int i = 0; i < CHANNELS_PER_FIXTURE; i++) {
+      response->printf("<div class='row'><span class='ch-num'>Ch %d</span>", i + 1);
+      response->printf("<input type='text' name='n%d' value='%s' maxlength='%d'></div>",
+                       i, fixtureChannelNames[fixtureId][i], FIXTURE_CHANNEL_NAME_LEN - 1);
+    }
+    response->print("<br><button class='button button-save' type='submit'>Save Names</button>");
+    response->print("</form>");
+    response->printf("<a href='/resetchannelnames?id=%d'><button class='button button-reset'>Reset to Defaults</button></a>", fixtureId);
+    response->print("</body></html>");
+    request->send(response);
+  });
+
+  server.on("/savechannelnames", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("id")) { request->redirect("/"); return; }
+    int fixtureId = request->getParam("id")->value().toInt();
+    if (fixtureId < 0 || fixtureId >= NUM_FIXTURES) { request->redirect("/"); return; }
+
+    for (int i = 0; i < CHANNELS_PER_FIXTURE; i++) {
+      String key = "n" + String(i);
+      if (request->hasParam(key)) {
+        String val = request->getParam(key)->value();
+        strncpy(fixtureChannelNames[fixtureId][i], val.c_str(), FIXTURE_CHANNEL_NAME_LEN - 1);
+        fixtureChannelNames[fixtureId][i][FIXTURE_CHANNEL_NAME_LEN - 1] = 0;
+      }
+    }
+    saveChannelNames(fixtureId);
+    request->redirect("/fixture?id=" + String(fixtureId));
+  });
+
+  server.on("/resetchannelnames", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("id")) { request->redirect("/"); return; }
+    int fixtureId = request->getParam("id")->value().toInt();
+    if (fixtureId < 0 || fixtureId >= NUM_FIXTURES) { request->redirect("/"); return; }
+
+    resetChannelNames(fixtureId);
+    saveChannelNames(fixtureId);
+    request->redirect("/fixture?id=" + String(fixtureId));
+  });
+
   // Keep old routes for backward compatibility
   server.on("/save", HTTP_GET, [](AsyncWebServerRequest *request){
     saveEEPROM();
