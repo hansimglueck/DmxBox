@@ -53,6 +53,7 @@ const char* password = WIFI_PASSWORD;
 char savedSSID[64] = {0};
 char savedPassword[64] = {0};
 bool apModeActive = false;
+unsigned long lastWiFiCheck = 0;
 
 const byte DNS_PORT = 53;
 DNSServer dnsServer;
@@ -319,7 +320,7 @@ bool timeControlEnabled = false;
 
 String getFormattedTime() {
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
+  if (!getLocalTime(&timeinfo, 0)) {
     return "Time not set";
   }
   
@@ -336,13 +337,14 @@ void initTime() {
     // Wait up to 5 seconds for time sync
     int timeout = 0;
     struct tm timeinfo;
-    while (!getLocalTime(&timeinfo) && timeout < 10) {
+    while (!getLocalTime(&timeinfo, 0) && timeout < 10) {
       delay(500);
       Serial.print(".");
       timeout++;
+      esp_task_wdt_reset();
     }
-    
-    if (getLocalTime(&timeinfo)) {
+
+    if (getLocalTime(&timeinfo, 0)) {
       timeInitialized = true;
       Serial.println("\nTime synchronized: " + getFormattedTime());
     } else {
@@ -357,8 +359,8 @@ bool isDMXActiveTime() {
   }
   
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
-    return true;  // Default to active if time not available
+  if (!getLocalTime(&timeinfo, 0)) {
+    return true;
   }
   
   int currentMinutes = timeinfo.tm_hour * 60 + timeinfo.tm_min;
@@ -1340,6 +1342,15 @@ void loop(){
   if (WiFi.status() == WL_CONNECTED && (millis() - lastTimeSync > 3600000)) {
     lastTimeSync = millis();
     initTime();
+  }
+
+  // STA-Verbindung überwachen, bei Verlust → AP
+  if (!apModeActive && millis() - lastWiFiCheck > 30000) {
+    lastWiFiCheck = millis();
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("WiFi lost, switching to AP mode");
+      switchToAPMode();
+    }
   }
   
   // Debug output every 10 seconds
