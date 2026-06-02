@@ -1,6 +1,5 @@
 #include "Arduino.h"
 #include <WiFi.h>
-#include <esp_wifi.h>
 #include <esp_task_wdt.h>
 #include <DNSServer.h>
 #include <EEPROM.h>
@@ -48,18 +47,12 @@ long lastLampToggle = millis();
 #define WIFI_PASSWORD "12345678"  // Fallback if not defined in platformio.ini
 #endif
 
-#ifndef WIFI_CONNECT_SSID
-#define WIFI_CONNECT_SSID ""  // WiFi to connect to (empty = skip connection attempt)
-#endif
-
-#ifndef WIFI_CONNECT_PASSWORD
-#define WIFI_CONNECT_PASSWORD ""
-#endif
-
 const char* ssid = WIFI_SSID;
 const char* password = WIFI_PASSWORD;
-const char* connectSSID = WIFI_CONNECT_SSID;
-const char* connectPassword = WIFI_CONNECT_PASSWORD;
+
+char savedSSID[64] = {0};
+char savedPassword[64] = {0};
+bool apModeActive = false;
 
 const byte DNS_PORT = 53;
 DNSServer dnsServer;
@@ -444,22 +437,76 @@ void sendFixturesPage(AsyncWebServerRequest *request) {
   response->print(".button-wifi:hover { background-color: #0b7dda; }");
   response->print("input { font-size: 18px; padding: 8px; width: 80px; background-color: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; }");
   response->print("a { color: #4CAF50; text-decoration: none; }");
+  
+  // Connection indicator styles
+  response->print("#connection-indicator { position: fixed; top: 10px; right: 10px; padding: 8px 15px;");
+  response->print("background-color: #2a2a2a; border-radius: 20px; border: 2px solid #4CAF50;");
+  response->print("font-size: 14px; z-index: 1000; display: flex; align-items: center; gap: 8px; }");
+  response->print(".status-dot { width: 10px; height: 10px; border-radius: 50%; background-color: #4CAF50; }");
+  response->print(".status-dot.disconnected { background-color: #f44336; animation: pulse 1s infinite; }");
+  response->print("@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }");
   response->print("</style>");
   
-  // JavaScript für dynamische Updates
+  // JavaScript für dynamische Updates und Connection Monitoring
   response->print("<script>");
+  response->print("let reconnectAttempts = 0;");
+  response->print("const maxReconnectAttempts = 5;");
+  response->print("let isConnected = true;");
+  
+  response->print("function updateConnectionStatus(connected, message) {");
+  response->print("  const indicator = document.getElementById('connection-indicator');");
+  response->print("  const dot = indicator.querySelector('.status-dot');");
+  response->print("  const text = indicator.querySelector('span');");
+  response->print("  if (connected) {");
+  response->print("    dot.classList.remove('disconnected');");
+  response->print("    text.textContent = message || 'Connected';");
+  response->print("    indicator.style.borderColor = '#4CAF50';");
+  response->print("  } else {");
+  response->print("    dot.classList.add('disconnected');");
+  response->print("    text.textContent = message || 'Disconnected';");
+  response->print("    indicator.style.borderColor = '#f44336';");
+  response->print("  }");
+  response->print("}");
+  
   response->print("function updateStatus() {");
   response->print("  fetch('/status')");
-  response->print("    .then(response => response.json())");
+  response->print("    .then(response => {");
+  response->print("      if (!response.ok) throw new Error('Server error');");
+  response->print("      return response.json();");
+  response->print("    })");
   response->print("    .then(data => {");
   response->print("      document.getElementById('status-box').innerHTML = data.html;");
+  response->print("      reconnectAttempts = 0;");
+  response->print("      if (!isConnected) {");
+  response->print("        isConnected = true;");
+  response->print("        updateConnectionStatus(true, 'Connected');");
+  response->print("      }");
+  response->print("    })");
+  response->print("    .catch(error => {");
+  response->print("      isConnected = false;");
+  response->print("      reconnectAttempts++;");
+  response->print("      if (reconnectAttempts <= maxReconnectAttempts) {");
+  response->print("        updateConnectionStatus(false, 'Reconnecting... (' + reconnectAttempts + '/' + maxReconnectAttempts + ')');");
+  response->print("      } else {");
+  response->print("        updateConnectionStatus(false, 'Disconnected - Reload page');");
+  response->print("      }");
   response->print("    });");
   response->print("}");
-  response->print("setInterval(updateStatus, 2000);"); // Update every 2 seconds
+  
+  response->print("setInterval(updateStatus, 5000);"); // Check every 5 seconds
+  response->print("updateStatus();"); // Initial call
   response->print("</script>");
   
   response->print("</head>");
-  response->print("<body><h1>DMX Fixtures</h1>");
+  response->print("<body>");
+  
+  // Connection indicator
+  response->print("<div id='connection-indicator'>");
+  response->print("<div class='status-dot'></div>");
+  response->print("<span>Connected</span>");
+  response->print("</div>");
+  
+  response->print("<h1>DMX Fixtures</h1>");
   
   // WiFi Status anzeigen - wird dynamisch aktualisiert
   response->print("<div id='status-box' class='info'>");
@@ -653,6 +700,22 @@ void loadWiFiConfig(char* ssid, char* password) {
   password[63] = 0; // Ensure null termination
 }
 
+void switchToAPMode() {
+  Serial.println("Starting AP mode...");
+  apModeActive = true;
+
+  WiFi.mode(WIFI_AP);
+  delay(100);
+
+  WiFi.softAP(ssid, password);
+
+  IPAddress apIP = WiFi.softAPIP();
+  Serial.printf("AP active - IP: %s\n", apIP.toString().c_str());
+
+  dnsServer.stop();
+  dnsServer.start(DNS_PORT, "*", apIP);
+}
+
 void setup(){
   // initialize digital pin LED_BUILTIN as an output.
   Serial.begin(115200);
@@ -677,57 +740,25 @@ void setup(){
   // Reset watchdog before WiFi operations
   esp_task_wdt_reset();
   
-  // Load WiFi config from EEPROM FIRST
-  char savedSSID[64] = {0};
-  char savedPassword[64] = {0};
+  // Load WiFi config from EEPROM
   loadWiFiConfig(savedSSID, savedPassword);
-  
-  // Start WiFi in AP_STA mode from the beginning
-  Serial.println("Starting WiFi in AP+STA Mode...");
-  WiFi.mode(WIFI_AP_STA);
-  
-  // Start AP first (always active)
-  Serial.println("Starting Access Point...");
-  WiFi.softAP(ssid, password);
-  
-  // Set WiFi TX power to maximum
-  WiFi.setTxPower(WIFI_POWER_19_5dBm);
-  esp_wifi_set_max_tx_power(84);
-  Serial.println("WiFi TX power set to maximum (21dBm)");
-  
-  IPAddress apIP = WiFi.softAPIP();
-  Serial.print("AP IP address: ");
-  Serial.println(apIP);
-  Serial.printf("AP MAC: %s\n", WiFi.softAPmacAddress().c_str());
-  
-  // Start DNS server for captive portal
-  dnsServer.start(DNS_PORT, "*", apIP);
-  Serial.println("DNS Server started for captive portal");
-  
-  // Try to connect to saved WiFi (STA mode in parallel)
+
   bool wifiConnected = false;
-  
   if (strlen(savedSSID) > 0) {
-    Serial.printf("Found saved WiFi config: %s\n", savedSSID);
+    Serial.printf("Connecting to: %s\n", savedSSID);
+    WiFi.mode(WIFI_STA);
     wifiConnected = connectToWiFi(savedSSID, savedPassword);
   }
-  
-  if (!wifiConnected && strlen(connectSSID) > 0) {
-    Serial.println("Trying configured WiFi from platformio.ini");
-    wifiConnected = connectToWiFi(connectSSID, connectPassword);
-  }
-  
-  esp_task_wdt_reset();  // Reset after WiFi attempt
-  
+
+  esp_task_wdt_reset();
+
   if (wifiConnected) {
-    Serial.println("WiFi Client Connected - Running in AP+STA Mode (Dual Mode)");
-    Serial.printf("Client IP: %s\n", WiFi.localIP().toString().c_str());
-    Serial.printf("Client MAC: %s\n", WiFi.macAddress().c_str());
-    
-    // Initialize time via NTP
+    apModeActive = false;
+    Serial.printf("Connected, IP: %s\n", WiFi.localIP().toString().c_str());
     initTime();
   } else {
-    Serial.println("WiFi Client not connected - Running in AP-only Mode");
+    Serial.println("No WiFi, starting AP mode");
+    switchToAPMode();
   }
   
   // Setup OTA with hostname
@@ -801,43 +832,37 @@ void setup(){
     AsyncResponseStream *response = request->beginResponseStream("application/json");
     
     String html = "";
-    
-    // AP is always active
-    html += "📶 <strong>Access Point Active</strong><br>";
-    html += "AP Network: " + String(ssid) + "<br>";
-    html += "AP IP: <strong>" + WiFi.softAPIP().toString() + "</strong><br>";
-    html += "AP MAC: " + WiFi.softAPmacAddress() + "<br>";
-    
-    // Show client connection if available
-    if (WiFi.getMode() == WIFI_AP_STA && WiFi.status() == WL_CONNECTED) {
-      html += "<br>📡 <strong>+ WiFi Client Connected</strong><br>";
+
+    if (!apModeActive && WiFi.status() == WL_CONNECTED) {
+      html += "📡 <strong style='color: #4CAF50;'>WiFi: STA</strong><br>";
       html += "Network: " + WiFi.SSID() + "<br>";
-      html += "Client IP: <strong>" + WiFi.localIP().toString() + "</strong><br>";
-      html += "Client MAC: " + WiFi.macAddress() + "<br>";
+      html += "IP: <strong>" + WiFi.localIP().toString() + "</strong><br>";
       html += "Signal: " + String(WiFi.RSSI()) + " dBm<br>";
-      
-      // Show time if available
+
       if (timeInitialized) {
         html += "<br>🕐 <strong>Time:</strong> " + getFormattedTime();
-        
+
         if (timeControlEnabled) {
           bool isActive = isDMXActiveTime();
-          html += "<br>📡 <strong>DMX Status:</strong> <span style='color: ";
+          html += "<br>📡 <strong>DMX:</strong> <span style='color: ";
           html += isActive ? "#4CAF50" : "#f44336";
           html += ";'>";
           html += isActive ? "ACTIVE" : "INACTIVE";
           html += "</span>";
-          
           char timeStr[32];
           sprintf(timeStr, "<br>⏰ Active: %02d:%02d - %02d:%02d",
                   dmxStartHour, dmxStartMinute, dmxEndHour, dmxEndMinute);
           html += timeStr;
         } else {
-          html += "<br>📡 <strong>DMX Status:</strong> <span style='color: #4CAF50;'>ALWAYS ACTIVE</span>";
+          html += "<br>📡 <strong>DMX:</strong> <span style='color: #4CAF50;'>ALWAYS ACTIVE</span>";
         }
       }
+    } else {
+      html += "📶 <strong style='color: #2196F3;'>WiFi: AP</strong><br>";
+      html += "Network: " + String(ssid) + "<br>";
+      html += "IP: <strong>" + WiFi.softAPIP().toString() + "</strong><br>";
     }
-    
+
     html += "<br>Hostname: <strong>" + String(ssid) + ".local</strong>";
     
     // JSON response with HTML content
@@ -1252,7 +1277,7 @@ void setup(){
     response->printf("<p><a href='/fixture?id=%d'>← Back to Channels</a></p>", fixtureId);
     
     response->print("<div style='margin: 30px;'>");
-    response->printf("<a href='/channel?fix=%d&ch=%d&delta=0'><button class='button'>0</button></a>", fixtureId, channelOffset);
+    response->printf("<a href='/channel?fix=%d&ch=%d&delta=-255'><button class='button'>0</button></a>", fixtureId, channelOffset);
     response->printf("<a href='/channel?fix=%d&ch=%d&delta=255'><button class='button'>255</button></a><br>", fixtureId, channelOffset);
     response->printf("<a href='/channel?fix=%d&ch=%d&delta=-50'><button class='button'>-50</button></a>", fixtureId, channelOffset);
     response->printf("<a href='/channel?fix=%d&ch=%d&delta=-10'><button class='button'>-10</button></a>", fixtureId, channelOffset);
@@ -1297,9 +1322,11 @@ void loop(){
   esp_task_wdt_reset();
   
   processOTA();
-  
-  // Always process DNS requests (AP is always active)
-  dnsServer.processNextRequest();
+
+  // Process DNS only in AP mode
+  if (apModeActive) {
+    dnsServer.processNextRequest();
+  }
   
   copyDataToDMXBuffer();
   
