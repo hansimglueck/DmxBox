@@ -1,12 +1,10 @@
 #include "Arduino.h"
 #include <WiFi.h>
-#include <esp_wifi.h>
 #include <esp_task_wdt.h>
 #include <DNSServer.h>
 #include <EEPROM.h>
 #include <AsyncTCP.h>
 #include "ESPAsyncWebServer.h"
-#include "SPIFFS.h"
 #include <esp_dmx.h>
 #include <OTAWrapper.h>
 #include <time.h>  // Add time library
@@ -16,23 +14,21 @@
 #define DMX_DEFAULT_INTR_FLAGS 0
 #endif
 
-// DMX Pin Configuration - can be overridden in platformio.ini
+// DMX configuration from platformio.ini
+#ifndef DMX_SERIAL_OUTPUT_PIN
+#define DMX_SERIAL_OUTPUT_PIN 17
+#endif
+#ifndef DMX_SERIAL_INPUT_PIN
+#define DMX_SERIAL_INPUT_PIN 16
+#endif
 #ifndef DMX_DIRECTION_PIN
 #define DMX_DIRECTION_PIN 15
 #endif
-
-#ifndef DMX_SERIAL_OUTPUT_PIN
-#define DMX_SERIAL_OUTPUT_PIN 17  // TX - ESP32 default
+#ifndef DMX_PORT
+#define DMX_PORT 1
 #endif
 
-#ifndef DMX_SERIAL_INPUT_PIN
-#define DMX_SERIAL_INPUT_PIN 16   // RX - ESP32 default
-#endif
-
-// int transmitPin = 17;
-// int receivePin = 16;
-// int enablePin = 21;
-dmx_port_t dmxPort = DMX_NUM_0;
+dmx_port_t dmxPort = DMX_PORT;
 byte data[DMX_PACKET_SIZE];
 byte dmxBuffer[DMX_PACKET_SIZE];
 unsigned long lastUpdate = millis();
@@ -50,18 +46,13 @@ long lastLampToggle = millis();
 #define WIFI_PASSWORD "12345678"  // Fallback if not defined in platformio.ini
 #endif
 
-#ifndef WIFI_CONNECT_SSID
-#define WIFI_CONNECT_SSID ""  // WiFi to connect to (empty = skip connection attempt)
-#endif
-
-#ifndef WIFI_CONNECT_PASSWORD
-#define WIFI_CONNECT_PASSWORD ""
-#endif
-
 const char* ssid = WIFI_SSID;
 const char* password = WIFI_PASSWORD;
-const char* connectSSID = WIFI_CONNECT_SSID;
-const char* connectPassword = WIFI_CONNECT_PASSWORD;
+
+char savedSSID[64] = {0};
+char savedPassword[64] = {0};
+bool apModeActive = false;
+unsigned long lastWiFiCheck = 0;
 
 const byte DNS_PORT = 53;
 DNSServer dnsServer;
@@ -102,6 +93,9 @@ const int output27 = 27;
 #define EEPROM_TIME_ENABLED 664
 #define EEPROM_WEEKDAY_TIME_START 665
 #define EEPROM_WEEKDAY_TIME_ENABLED 693
+#define EEPROM_CHANNEL_NAMES_START 694
+#define FIXTURE_CHANNEL_NAME_LEN 12
+// 10 fixtures * 16 channels * 12 bytes = 1920 bytes -> end at 2614
 
 struct Fixture {
   char name[10];
@@ -109,6 +103,7 @@ struct Fixture {
 };
 
 Fixture fixtures[NUM_FIXTURES];
+char fixtureChannelNames[NUM_FIXTURES][CHANNELS_PER_FIXTURE][FIXTURE_CHANNEL_NAME_LEN];
 
 String channel_names[CHANNELS] = {
   "Cyna", //1  
@@ -333,7 +328,7 @@ const char* weekdayNames[7] = {"Montag", "Dienstag", "Mittwoch", "Donnerstag", "
 
 String getFormattedTime() {
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
+  if (!getLocalTime(&timeinfo, 0)) {
     return "Time not set";
   }
   
@@ -350,13 +345,14 @@ void initTime() {
     // Wait up to 5 seconds for time sync
     int timeout = 0;
     struct tm timeinfo;
-    while (!getLocalTime(&timeinfo) && timeout < 10) {
+    while (!getLocalTime(&timeinfo, 0) && timeout < 10) {
       delay(500);
       Serial.print(".");
       timeout++;
+      esp_task_wdt_reset();
     }
-    
-    if (getLocalTime(&timeinfo)) {
+
+    if (getLocalTime(&timeinfo, 0)) {
       timeInitialized = true;
       Serial.println("\nTime synchronized: " + getFormattedTime());
     } else {
@@ -371,8 +367,8 @@ bool isDMXActiveTime() {
   }
   
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
-    return true;  // Default to active if time not available
+  if (!getLocalTime(&timeinfo, 0)) {
+    return true;
   }
   
   // Map tm_wday (0=Sunday, 1=Monday, ..., 6=Saturday) to our array (0=Monday, ..., 6=Sunday)
@@ -464,22 +460,76 @@ void sendFixturesPage(AsyncWebServerRequest *request) {
   response->print(".button-wifi:hover { background-color: #0b7dda; }");
   response->print("input { font-size: 18px; padding: 8px; width: 80px; background-color: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; }");
   response->print("a { color: #4CAF50; text-decoration: none; }");
+  
+  // Connection indicator styles
+  response->print("#connection-indicator { position: fixed; top: 10px; right: 10px; padding: 8px 15px;");
+  response->print("background-color: #2a2a2a; border-radius: 20px; border: 2px solid #4CAF50;");
+  response->print("font-size: 14px; z-index: 1000; display: flex; align-items: center; gap: 8px; }");
+  response->print(".status-dot { width: 10px; height: 10px; border-radius: 50%; background-color: #4CAF50; }");
+  response->print(".status-dot.disconnected { background-color: #f44336; animation: pulse 1s infinite; }");
+  response->print("@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }");
   response->print("</style>");
   
-  // JavaScript für dynamische Updates
+  // JavaScript für dynamische Updates und Connection Monitoring
   response->print("<script>");
+  response->print("let reconnectAttempts = 0;");
+  response->print("const maxReconnectAttempts = 5;");
+  response->print("let isConnected = true;");
+  
+  response->print("function updateConnectionStatus(connected, message) {");
+  response->print("  const indicator = document.getElementById('connection-indicator');");
+  response->print("  const dot = indicator.querySelector('.status-dot');");
+  response->print("  const text = indicator.querySelector('span');");
+  response->print("  if (connected) {");
+  response->print("    dot.classList.remove('disconnected');");
+  response->print("    text.textContent = message || 'Connected';");
+  response->print("    indicator.style.borderColor = '#4CAF50';");
+  response->print("  } else {");
+  response->print("    dot.classList.add('disconnected');");
+  response->print("    text.textContent = message || 'Disconnected';");
+  response->print("    indicator.style.borderColor = '#f44336';");
+  response->print("  }");
+  response->print("}");
+  
   response->print("function updateStatus() {");
   response->print("  fetch('/status')");
-  response->print("    .then(response => response.json())");
+  response->print("    .then(response => {");
+  response->print("      if (!response.ok) throw new Error('Server error');");
+  response->print("      return response.json();");
+  response->print("    })");
   response->print("    .then(data => {");
   response->print("      document.getElementById('status-box').innerHTML = data.html;");
+  response->print("      reconnectAttempts = 0;");
+  response->print("      if (!isConnected) {");
+  response->print("        isConnected = true;");
+  response->print("        updateConnectionStatus(true, 'Connected');");
+  response->print("      }");
+  response->print("    })");
+  response->print("    .catch(error => {");
+  response->print("      isConnected = false;");
+  response->print("      reconnectAttempts++;");
+  response->print("      if (reconnectAttempts <= maxReconnectAttempts) {");
+  response->print("        updateConnectionStatus(false, 'Reconnecting... (' + reconnectAttempts + '/' + maxReconnectAttempts + ')');");
+  response->print("      } else {");
+  response->print("        updateConnectionStatus(false, 'Disconnected - Reload page');");
+  response->print("      }");
   response->print("    });");
   response->print("}");
-  response->print("setInterval(updateStatus, 2000);"); // Update every 2 seconds
+  
+  response->print("setInterval(updateStatus, 5000);"); // Check every 5 seconds
+  response->print("updateStatus();"); // Initial call
   response->print("</script>");
   
   response->print("</head>");
-  response->print("<body><h1>DMX Fixtures</h1>");
+  response->print("<body>");
+  
+  // Connection indicator
+  response->print("<div id='connection-indicator'>");
+  response->print("<div class='status-dot'></div>");
+  response->print("<span>Connected</span>");
+  response->print("</div>");
+  
+  response->print("<h1>DMX Fixtures</h1>");
   
   // WiFi Status anzeigen - wird dynamisch aktualisiert
   response->print("<div id='status-box' class='info'>");
@@ -601,6 +651,38 @@ void resetEEPROM() {
   Serial.println("EEPROM reset complete - All DMX channels set to 0");
 }
 
+void resetChannelNames(int fixtureId) {
+  for (int ch = 0; ch < CHANNELS_PER_FIXTURE; ch++) {
+    snprintf(fixtureChannelNames[fixtureId][ch], FIXTURE_CHANNEL_NAME_LEN, "Ch %d", ch + 1);
+  }
+}
+
+void loadChannelNames() {
+  for (int fix = 0; fix < NUM_FIXTURES; fix++) {
+    for (int ch = 0; ch < CHANNELS_PER_FIXTURE; ch++) {
+      int addr = EEPROM_CHANNEL_NAMES_START + (fix * CHANNELS_PER_FIXTURE + ch) * FIXTURE_CHANNEL_NAME_LEN;
+      char* name = fixtureChannelNames[fix][ch];
+      for (int i = 0; i < FIXTURE_CHANNEL_NAME_LEN; i++) {
+        name[i] = EEPROM.read(addr + i);
+      }
+      name[FIXTURE_CHANNEL_NAME_LEN - 1] = 0;
+      if (name[0] == 0 || (uint8_t)name[0] == 0xFF) {
+        resetChannelNames(fix);
+      }
+    }
+  }
+}
+
+void saveChannelNames(int fixtureId) {
+  for (int ch = 0; ch < CHANNELS_PER_FIXTURE; ch++) {
+    int addr = EEPROM_CHANNEL_NAMES_START + (fixtureId * CHANNELS_PER_FIXTURE + ch) * FIXTURE_CHANNEL_NAME_LEN;
+    for (int i = 0; i < FIXTURE_CHANNEL_NAME_LEN; i++) {
+      EEPROM.write(addr + i, fixtureChannelNames[fixtureId][ch][i]);
+    }
+  }
+  EEPROM.commit();
+}
+
 bool connectToWiFi(const char* ssid, const char* password, int maxAttempts = 20) {
   if (strlen(ssid) == 0) {
     Serial.println("No WiFi SSID configured for connection");
@@ -622,11 +704,9 @@ bool connectToWiFi(const char* ssid, const char* password, int maxAttempts = 20)
     attempts++;
     
     // Reset watchdog every 2 attempts (every ~1 second)
-    #ifdef ESP32_DUAL_CORE
-      if (attempts % 2 == 0) {
-        esp_task_wdt_reset();
-      }
-    #endif
+    if (attempts % 2 == 0) {
+      esp_task_wdt_reset();
+    }
   }
   
   if (WiFi.status() == WL_CONNECTED) {
@@ -699,6 +779,22 @@ void loadWiFiConfig(char* ssid, char* password) {
   }
 }
 
+void switchToAPMode() {
+  Serial.println("Starting AP mode...");
+  apModeActive = true;
+
+  WiFi.mode(WIFI_AP);
+  delay(100);
+
+  WiFi.softAP(ssid, password);
+
+  IPAddress apIP = WiFi.softAPIP();
+  Serial.printf("AP active - IP: %s\n", apIP.toString().c_str());
+
+  dnsServer.stop();
+  dnsServer.start(DNS_PORT, "*", apIP);
+}
+
 void setup(){
   // initialize digital pin LED_BUILTIN as an output.
   Serial.begin(115200);
@@ -706,25 +802,14 @@ void setup(){
   Serial.println("\n\n=== DMX Box Starting ===");
   
   // Configure watchdog timer FIRST (10 seconds timeout) - only for ESP32 dual-core
-  #ifdef ESP32_DUAL_CORE
-    esp_task_wdt_init(10, true);
-    esp_task_wdt_add(NULL);
-    Serial.println("Watchdog timer configured (10s timeout)");
-  #else
-    Serial.println("ESP32-C3: Watchdog disabled for stability");
-  #endif
+  esp_task_wdt_init(10, true);
+  esp_task_wdt_add(NULL);
+  Serial.println("Watchdog timer configured (10s timeout)");
   
-  // Disable Core 0 WDT only on dual-core ESP32
-  #ifdef ESP32_DUAL_CORE
-    Serial.println("ESP32 dual-core - will disable Core 0 WDT");
-    disableCore0WDT();
-  #else
-    Serial.println("Single-core chip - Core 0 WDT remains active");
-  #endif
   
   // initialize EEPROM with predefined size BEFORE reading WiFi config
-  EEPROM.begin(1024);
-  Serial.println("EEPROM initialized (1024 bytes)");
+  EEPROM.begin(3000);
+  Serial.println("EEPROM initialized (3000 bytes)");
   
   // Load time control settings
   loadTimeControl();
@@ -732,88 +817,42 @@ void setup(){
                 timeControlEnabled ? "ENABLED" : "DISABLED");
   
   // Reset watchdog before WiFi operations
-  #ifdef ESP32_DUAL_CORE
-    esp_task_wdt_reset();
-  #endif
+  esp_task_wdt_reset();
   
-  // Load WiFi config from EEPROM FIRST
-  char savedSSID[64] = {0};
-  char savedPassword[64] = {0};
+  // Load WiFi config from EEPROM
   loadWiFiConfig(savedSSID, savedPassword);
-  
-  // Start WiFi in AP_STA mode from the beginning
-  Serial.println("Starting WiFi in AP+STA Mode...");
-  WiFi.mode(WIFI_AP_STA);
-  
-  // Start AP first (always active)
-  Serial.println("Starting Access Point...");
-  WiFi.softAP(ssid, password);
-  
-  // Set WiFi TX power to maximum
-  WiFi.setTxPower(WIFI_POWER_19_5dBm);
-  esp_wifi_set_max_tx_power(84);
-  Serial.println("WiFi TX power set to maximum (21dBm)");
-  
-  IPAddress apIP = WiFi.softAPIP();
-  Serial.print("AP IP address: ");
-  Serial.println(apIP);
-  Serial.printf("AP MAC: %s\n", WiFi.softAPmacAddress().c_str());
-  
-  // Start DNS server for captive portal
-  dnsServer.start(DNS_PORT, "*", apIP);
-  Serial.println("DNS Server started for captive portal");
-  
-  // Try to connect to saved WiFi (STA mode in parallel)
+
   bool wifiConnected = false;
-  
   if (strlen(savedSSID) > 0) {
-    Serial.printf("Found saved WiFi config: %s\n", savedSSID);
+    Serial.printf("Connecting to: %s\n", savedSSID);
+    WiFi.mode(WIFI_STA);
     wifiConnected = connectToWiFi(savedSSID, savedPassword);
   }
-  
-  if (!wifiConnected && strlen(connectSSID) > 0) {
-    Serial.println("Trying configured WiFi from platformio.ini");
-    wifiConnected = connectToWiFi(connectSSID, connectPassword);
-  }
-  
-  #ifdef ESP32_DUAL_CORE
-    esp_task_wdt_reset();  // Reset after WiFi attempt
-  #endif
-  
+
+  esp_task_wdt_reset();
+
   if (wifiConnected) {
-    Serial.println("WiFi Client Connected - Running in AP+STA Mode (Dual Mode)");
-    Serial.printf("Client IP: %s\n", WiFi.localIP().toString().c_str());
-    Serial.printf("Client MAC: %s\n", WiFi.macAddress().c_str());
-    
-    // Initialize time via NTP
+    apModeActive = false;
+    Serial.printf("Connected, IP: %s\n", WiFi.localIP().toString().c_str());
     initTime();
   } else {
-    Serial.println("WiFi Client not connected - Running in AP-only Mode");
+    Serial.println("No WiFi, starting AP mode");
+    switchToAPMode();
   }
   
   // Setup OTA with hostname
   setupOTA(ssid, password);
   Serial.printf("Hostname: %s.local\n", ssid);
 
-  #ifdef ESP32_DUAL_CORE
-    esp_task_wdt_reset();  // Reset after WiFi setup complete
-  #endif
-
-  // Initialize SPIFFS
-  if(!SPIFFS.begin(true)){
-    Serial.println("An Error has occurred while mounting SPIFFS");
-    return;
+  // DMX Setup - FIRST install driver, THEN set pins
+  Serial.println("Installing DMX driver...");
+  dmx_config_t config = DMX_CONFIG_DEFAULT;
+  esp_err_t err = dmx_driver_install(dmxPort, &config, NULL, 0);
+  if (err == ESP_OK) {
+    Serial.printf("DMX driver installed successfully on port %d\n", dmxPort);
+  } else {
+    Serial.printf("ERROR: DMX driver installation failed with code %d\n", err);
   }
-  Serial.println("SPIFFS mounted successfully");
-
-  #ifdef ESP32_DUAL_CORE
-    esp_task_wdt_reset();  // Reset after SPIFFS
-  #endif
-
-  // DMX Setup - IMPORTANT: Set pins BEFORE installing driver!
-  Serial.println("Cleaning up any existing DMX driver...");
-  dmx_driver_delete(dmxPort);  // Safe to call even if driver doesn't exist
-  delay(100);  // Brief delay to ensure cleanup completes
   
   Serial.printf("Setting DMX pins: TX=%d, RX=%d, DIR=%d\n", 
                 DMX_SERIAL_OUTPUT_PIN, DMX_SERIAL_INPUT_PIN, DMX_DIRECTION_PIN);
@@ -835,10 +874,6 @@ void setup(){
   }
   Serial.println("setup dmx complete");
 
-  #ifdef ESP32_DUAL_CORE
-    esp_task_wdt_reset();  // Reset after DMX setup
-  #endif
-
   pinMode(2, OUTPUT);
 
   // Load all 512 DMX channels from EEPROM
@@ -846,25 +881,17 @@ void setup(){
     data[i] = EEPROM.read(EEPROM_DMX_START + i);
     
     // Reset watchdog every 128 channels
-    #ifdef ESP32_DUAL_CORE
-      if (i % 128 == 0) {
-        esp_task_wdt_reset();
-      }
-    #endif
+    if (i % 128 == 0) {
+      esp_task_wdt_reset();
+    }
   }
   Serial.println("Loaded 512 DMX channels from EEPROM");
   
   initFixtures();
+  loadChannelNames();
   Serial.println("Fixtures initialized:");
-  for (int i = 0; i < NUM_FIXTURES; i++) {
-    Serial.printf("  %s: Start Address = %d\n", fixtures[i].name, fixtures[i].startAddress);
-  }
 
   Serial.println("setup ap complete");
-
-  #ifdef ESP32_DUAL_CORE
-    esp_task_wdt_reset();  // Reset before setting up server routes
-  #endif
 
   //more handlers...
   // Route for root / web page - now shows fixtures list
@@ -876,28 +903,19 @@ void setup(){
     AsyncResponseStream *response = request->beginResponseStream("application/json");
     
     String html = "";
-    
-    // AP is always active
-    html += "📶 <strong>Access Point Active</strong><br>";
-    html += "AP Network: " + String(ssid) + "<br>";
-    html += "AP IP: <strong>" + WiFi.softAPIP().toString() + "</strong><br>";
-    html += "AP MAC: " + WiFi.softAPmacAddress() + "<br>";
-    
-    // Show client connection if available
-    if (WiFi.getMode() == WIFI_AP_STA && WiFi.status() == WL_CONNECTED) {
-      html += "<br>📡 <strong>+ WiFi Client Connected</strong><br>";
+
+    if (!apModeActive && WiFi.status() == WL_CONNECTED) {
+      html += "📡 <strong style='color: #4CAF50;'>WiFi: STA</strong><br>";
       html += "Network: " + WiFi.SSID() + "<br>";
-      html += "Client IP: <strong>" + WiFi.localIP().toString() + "</strong><br>";
-      html += "Client MAC: " + WiFi.macAddress() + "<br>";
+      html += "IP: <strong>" + WiFi.localIP().toString() + "</strong><br>";
       html += "Signal: " + String(WiFi.RSSI()) + " dBm<br>";
-      
-      // Show time if available
+
       if (timeInitialized) {
         html += "<br>🕐 <strong>Time:</strong> " + getFormattedTime();
-        
+
         if (timeControlEnabled) {
           bool isActive = isDMXActiveTime();
-          html += "<br>📡 <strong>DMX Status:</strong> <span style='color: ";
+          html += "<br>📡 <strong>DMX:</strong> <span style='color: ";
           html += isActive ? "#4CAF50" : "#f44336";
           html += ";'>";
           html += isActive ? "ACTIVE" : "INACTIVE";
@@ -915,11 +933,15 @@ void setup(){
             html += scheduleStr;
           }
         } else {
-          html += "<br>📡 <strong>DMX Status:</strong> <span style='color: #4CAF50;'>ALWAYS ACTIVE</span>";
+          html += "<br>📡 <strong>DMX:</strong> <span style='color: #4CAF50;'>ALWAYS ACTIVE</span>";
         }
       }
+    } else {
+      html += "📶 <strong style='color: #2196F3;'>WiFi: AP</strong><br>";
+      html += "Network: " + String(ssid) + "<br>";
+      html += "IP: <strong>" + WiFi.softAPIP().toString() + "</strong><br>";
     }
-    
+
     html += "<br>Hostname: <strong>" + String(ssid) + ".local</strong>";
     
     // JSON response with HTML content
@@ -995,9 +1017,7 @@ void setup(){
   
   server.on("/wifiscan", HTTP_GET, [](AsyncWebServerRequest *request){
     // Feed the watchdog before long operation
-    #ifdef ESP32_DUAL_CORE
-      esp_task_wdt_reset();
-    #endif
+    esp_task_wdt_reset();
     
     AsyncResponseStream *response = request->beginResponseStream("text/html");
     response->print("<!DOCTYPE html><html>");
@@ -1025,16 +1045,9 @@ void setup(){
     response->print("<h2>Available Networks:</h2>");
     
     Serial.println("Starting WiFi scan...");
-    #ifdef ESP32_DUAL_CORE
-      esp_task_wdt_reset();  // Reset before scan
-    #endif
     
     // Async scan with timeout
     int n = WiFi.scanNetworks(false, false, false, 300);  // 300ms per channel max
-    
-    #ifdef ESP32_DUAL_CORE
-      esp_task_wdt_reset();  // Reset after scan
-    #endif
     Serial.printf("Scan complete, found %d networks\n", n);
     
     if (n == 0) {
@@ -1042,9 +1055,6 @@ void setup(){
       response->print("<p><a href='/wifisetup'><button class='button'>Scan Again</button></a></p>");
     } else {
       for (int i = 0; i < n && i < 20; i++) {  // Limit to 20 networks
-        #ifdef ESP32_DUAL_CORE
-          esp_task_wdt_reset();  // Reset for each network
-        #endif
         
         String ssid = WiFi.SSID(i);
         int rssi = WiFi.RSSI(i);
@@ -1074,10 +1084,6 @@ void setup(){
     response->print("</div>");
     
     response->print("</body></html>");
-    
-    #ifdef ESP32_DUAL_CORE
-      esp_task_wdt_reset();  // Reset before sending
-    #endif
     request->send(response);
   });
   
@@ -1307,25 +1313,32 @@ void setup(){
     response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
     response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
     response->print("h1, h2 { color: #4CAF50; }");
-    response->print(".channel { margin: 10px; padding: 10px; border: 1px solid #555; background-color: #2a2a2a; border-radius: 4px; }");
+    response->print(".channel { margin: 10px; padding: 10px; border: 1px solid #555; background-color: #2a2a2a; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; }");
     response->print(".channel:hover { background-color: #333; }");
+    response->print(".channel a { text-decoration: none; color: #4CAF50; flex: 1; }");
+    response->print(".ch-name { color: #aaa; font-size: 16px; min-width: 80px; text-align: left; }");
+    response->print(".ch-val { font-weight: bold; min-width: 40px; text-align: right; }");
+    response->print(".button { background-color: #4CAF50; border: none; color: white; padding: 11px 15px; font-size: 18px; margin: 8px; cursor: pointer; border-radius: 4px; }");
+    response->print(".button-edit { background-color: #2196F3; }");
     response->print("a { text-decoration: none; color: #4CAF50; }");
     response->print("p { color: #aaa; }");
     response->print("</style></head>");
-    response->printf("<body><h1>%s - Channels</h1>", fixtures[fixtureId].name);
-    response->print("<p><a href='/'>← Back to Fixtures</a></p>");
-    
+    response->printf("<body><h1>%s</h1>", fixtures[fixtureId].name);
+    response->print("<p><a href='/'>← Back</a></p>");
+    response->printf("<a href='/fixturenames?id=%d'><button class='button button-edit'>Edit Channel Names</button></a>", fixtureId);
+
     uint16_t startAddr = fixtures[fixtureId].startAddress;
     for (int i = 0; i < CHANNELS_PER_FIXTURE; i++) {
       uint16_t dmxChannel = startAddr + i;
       if (dmxChannel > 0 && dmxChannel <= 512) {
         response->printf("<div class='channel'>");
-        response->printf("<a href='/channel?fix=%d&ch=%d'>Channel %d (DMX %d): %d</a>",
-                        fixtureId, i, i + 1, dmxChannel, data[dmxChannel]);
+        response->printf("<span class='ch-name'>%s</span>", fixtureChannelNames[fixtureId][i]);
+        response->printf("<a href='/channel?fix=%d&ch=%d'>DMX %d</a>", fixtureId, i, dmxChannel);
+        response->printf("<span class='ch-val'>%d</span>", data[dmxChannel]);
         response->printf("</div>");
       }
     }
-    
+
     response->print("</body></html>");
     request->send(response);
   });
@@ -1347,37 +1360,59 @@ void setup(){
     
     uint16_t dmxChannel = fixtures[fixtureId].startAddress + channelOffset;
     if (dmxChannel > 0 && dmxChannel <= 512) {
-      if (delta != 0) {
-        int newVal = data[dmxChannel] + delta;
-        if (newVal < 0) newVal = 0;
-        if (newVal > 255) newVal = 255;
+      if (request->hasParam("val")) {
+        int newVal = constrain(request->getParam("val")->value().toInt(), 0, 255);
+        data[dmxChannel] = newVal;
+      } else if (delta != 0) {
+        int newVal = constrain((int)data[dmxChannel] + delta, 0, 255);
         data[dmxChannel] = newVal;
       }
     }
-    
+
+    if (request->hasParam("name")) {
+      String newName = request->getParam("name")->value();
+      strncpy(fixtureChannelNames[fixtureId][channelOffset], newName.c_str(), FIXTURE_CHANNEL_NAME_LEN - 1);
+      fixtureChannelNames[fixtureId][channelOffset][FIXTURE_CHANNEL_NAME_LEN - 1] = 0;
+      saveChannelNames(fixtureId);
+    }
+
     AsyncResponseStream *response = request->beginResponseStream("text/html");
     response->print("<!DOCTYPE html><html>");
     response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-    response->print("<link rel=\"icon\" href=\"data:,\">");
-    response->print("<base target='_self'>");  // Add this line
+    response->print("<link rel=\"icon\" href=\"data:,\"><base target='_self'>");
     response->print("<style>");
     response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
     response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
     response->print("h1, h2 { color: #4CAF50; }");
     response->print(".button { background-color: #4CAF50; border: none; color: white; padding: 15px 20px;");
-    response->print("text-decoration: none; font-size: 20px; margin: 5px; cursor: pointer; display: inline-block; min-width: 80px; border-radius: 4px;}");
+    response->print("font-size: 20px; margin: 5px; cursor: pointer; display: inline-block; min-width: 80px; border-radius: 4px;}");
     response->print(".button:hover { background-color: #45a049; }");
-    response->print(".button:active { background-color: #3d8b40; }");
+    response->print(".button-name { background-color: #2196F3; padding: 10px 15px; font-size: 18px; }");
+    response->print("input[type=text] { font-size: 18px; padding: 8px; width: 180px; background-color: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; }");
     response->print("a { text-decoration: none; color: #4CAF50; }");
     response->print("p { color: #aaa; }");
+    response->print("h1 { cursor: pointer; }");
+    response->print("h1:hover { color: #45a049; }");
     response->print("</style></head>");
-    response->printf("<body><h1>%s - Channel %d</h1>", fixtures[fixtureId].name, channelOffset + 1);
-    response->printf("<h2>DMX Channel: %d</h2>", dmxChannel);
-    response->printf("<h2>Value: %d</h2>", data[dmxChannel]);
-    response->printf("<p><a href='/fixture?id=%d'>← Back to Channels</a></p>", fixtureId);
+    response->printf("<body><h1 onclick=\"document.getElementById('rf').style.display='block';document.getElementById('rn').select();\">%s</h1>", fixtureChannelNames[fixtureId][channelOffset]);
+    response->printf("<form id='rf' action='/channel' method='get' style='display:none; margin:10px;'>");
+    response->printf("<input type='hidden' name='fix' value='%d'>", fixtureId);
+    response->printf("<input type='hidden' name='ch' value='%d'>", channelOffset);
+    response->printf("<input id='rn' type='text' name='name' value='%s' maxlength='%d'>", fixtureChannelNames[fixtureId][channelOffset], FIXTURE_CHANNEL_NAME_LEN - 1);
+    response->print("<button class='button button-name' type='submit'>OK</button>");
+    response->print("</form>");
+    response->printf("<h2>DMX %d</h2>", dmxChannel);
+    response->printf("<h2 onclick=\"document.getElementById('vf').style.display='block';document.getElementById('vn').select();\" style='cursor:pointer;'>%d</h2>", data[dmxChannel]);
+    response->printf("<form id='vf' action='/channel' method='get' style='display:none; margin:10px;'>");
+    response->printf("<input type='hidden' name='fix' value='%d'>", fixtureId);
+    response->printf("<input type='hidden' name='ch' value='%d'>", channelOffset);
+    response->printf("<input id='vn' type='number' name='val' value='%d' min='0' max='255' style='font-size:18px;padding:8px;width:100px;background-color:#333;color:#e0e0e0;border:1px solid #555;border-radius:4px;'>", data[dmxChannel]);
+    response->print("<button class='button button-name' type='submit'>OK</button>");
+    response->print("</form>");
+    response->printf("<p><a href='/fixture?id=%d'>← Back</a></p>", fixtureId);
     
     response->print("<div style='margin: 30px;'>");
-    response->printf("<a href='/channel?fix=%d&ch=%d&delta=0'><button class='button'>0</button></a>", fixtureId, channelOffset);
+    response->printf("<a href='/channel?fix=%d&ch=%d&delta=-255'><button class='button'>0</button></a>", fixtureId, channelOffset);
     response->printf("<a href='/channel?fix=%d&ch=%d&delta=255'><button class='button'>255</button></a><br>", fixtureId, channelOffset);
     response->printf("<a href='/channel?fix=%d&ch=%d&delta=-50'><button class='button'>-50</button></a>", fixtureId, channelOffset);
     response->printf("<a href='/channel?fix=%d&ch=%d&delta=-10'><button class='button'>-10</button></a>", fixtureId, channelOffset);
@@ -1393,26 +1428,103 @@ void setup(){
     request->send(response);
   });
   
+  server.on("/fixturenames", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("id")) { request->redirect("/"); return; }
+    int fixtureId = request->getParam("id")->value().toInt();
+    if (fixtureId < 0 || fixtureId >= NUM_FIXTURES) { request->redirect("/"); return; }
+
+    AsyncResponseStream *response = request->beginResponseStream("text/html");
+    response->print("<!DOCTYPE html><html>");
+    response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+    response->print("<link rel=\"icon\" href=\"data:,\"><base target='_self'>");
+    response->print("<style>");
+    response->print("body { background-color: #1a1a1a; color: #e0e0e0; font-family: Helvetica, Arial, sans-serif; text-align: center; font-size: 20px; }");
+    response->print("h1 { color: #2196F3; }");
+    response->print(".row { display: flex; align-items: center; justify-content: center; margin: 8px; gap: 10px; }");
+    response->print(".ch-num { color: #aaa; width: 50px; text-align: right; font-size: 16px; }");
+    response->print("input { font-size: 18px; padding: 8px; width: 200px; background-color: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; }");
+    response->print(".button { border: none; color: white; padding: 12px 25px; font-size: 20px; margin: 10px; cursor: pointer; border-radius: 4px; }");
+    response->print(".button-save { background-color: #4CAF50; }");
+    response->print(".button-reset { background-color: #f44336; }");
+    response->print("a { color: #4CAF50; text-decoration: none; }");
+    response->print(".button-preset { background-color: #555; padding: 8px 14px; font-size: 16px; margin: 4px; }");
+    response->print(".button-preset:hover { background-color: #777; }");
+    response->print("</style>");
+    response->print("<script>");
+    response->print("const presets={");
+    response->print("'SharpyPlus':['Cyna','Magenta','Yellow','Colour1','Colour2','Colour3','Strobe','Dimmer','Dimmer Fine','Gobo','Animation','Ani Rot','Gobo2','Gobo2 Rot','Rot Fine','4Prism'],");
+    response->print("'Beam330':['Color','Strobe','Dimmer','Gobo','Gobo Rot','Prism','Prism Rot','Zoom1','Zoom2','Pan','Pan Fine','Tilt','Tilt Fine','Focus','Frost','Lamp Ctrl'],");
+    response->print("'Beam230':['Pan','Tilt','Pan Fine','Tilt Fine','Dimmer','Strobe','Frost','Focus','Gobo','Gobo Shake','Color','??','Prism','Prism Rot','??','??'],");
+    response->print("'Beam230neu':['Color','Strobe','Dimmer','Gobo','Prism','Prism Rot','PrismRot2','Bunt','Focus','Pan','Pan Fine','Tilt','Tilt Fine','PT Time','Reset','Lamp Ctrl'],");
+    response->print("'Beam230v21':['Pan','Tilt','Pan Fine','Tilt Fine','XY Speed','Zoom','Strobe','Dimmer','Color','Gobo','Gobo2','Gobo Rot','Focus','Prism','Prism Rot','Reset']");
+    response->print("};");
+    response->print("function applyPreset(name){const p=presets[name];for(let i=0;i<16;i++){const el=document.querySelector('input[name=\"n'+i+'\"]');if(el)el.value=p[i]||'';}};");
+    response->print("</script>");
+    response->print("</head>");
+    response->printf("<body><h1>%s – Channel Names</h1>", fixtures[fixtureId].name);
+    response->printf("<p><a href='/fixture?id=%d'>← Back</a></p>", fixtureId);
+
+    response->print("<div style='margin:10px;'>");
+    response->print("<span style='color:#aaa;font-size:16px;'>Preset: </span>");
+    response->print("<button class='button button-preset' onclick='applyPreset(\"SharpyPlus\")'>SharpyPlus</button>");
+    response->print("<button class='button button-preset' onclick='applyPreset(\"Beam330\")'>Beam330</button>");
+    response->print("<button class='button button-preset' onclick='applyPreset(\"Beam230\")'>Beam230</button>");
+    response->print("<button class='button button-preset' onclick='applyPreset(\"Beam230neu\")'>Beam230neu</button>");
+    response->print("<button class='button button-preset' onclick='applyPreset(\"Beam230v21\")'>Beam230v21</button>");
+    response->print("</div>");
+
+    response->printf("<form action='/savechannelnames' method='get'>");
+    response->printf("<input type='hidden' name='id' value='%d'>", fixtureId);
+    for (int i = 0; i < CHANNELS_PER_FIXTURE; i++) {
+      response->printf("<div class='row'><span class='ch-num'>Ch %d</span>", i + 1);
+      response->printf("<input type='text' name='n%d' value='%s' maxlength='%d'></div>",
+                       i, fixtureChannelNames[fixtureId][i], FIXTURE_CHANNEL_NAME_LEN - 1);
+    }
+    response->print("<br><button class='button button-save' type='submit'>Save Names</button>");
+    response->print("</form>");
+    response->printf("<a href='/resetchannelnames?id=%d'><button class='button button-reset'>Reset to Defaults</button></a>", fixtureId);
+    response->print("</body></html>");
+    request->send(response);
+  });
+
+  server.on("/savechannelnames", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("id")) { request->redirect("/"); return; }
+    int fixtureId = request->getParam("id")->value().toInt();
+    if (fixtureId < 0 || fixtureId >= NUM_FIXTURES) { request->redirect("/"); return; }
+
+    for (int i = 0; i < CHANNELS_PER_FIXTURE; i++) {
+      String key = "n" + String(i);
+      if (request->hasParam(key)) {
+        String val = request->getParam(key)->value();
+        strncpy(fixtureChannelNames[fixtureId][i], val.c_str(), FIXTURE_CHANNEL_NAME_LEN - 1);
+        fixtureChannelNames[fixtureId][i][FIXTURE_CHANNEL_NAME_LEN - 1] = 0;
+      }
+    }
+    saveChannelNames(fixtureId);
+    request->redirect("/fixture?id=" + String(fixtureId));
+  });
+
+  server.on("/resetchannelnames", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("id")) { request->redirect("/"); return; }
+    int fixtureId = request->getParam("id")->value().toInt();
+    if (fixtureId < 0 || fixtureId >= NUM_FIXTURES) { request->redirect("/"); return; }
+
+    resetChannelNames(fixtureId);
+    saveChannelNames(fixtureId);
+    request->redirect("/fixture?id=" + String(fixtureId));
+  });
+
   // Keep old routes for backward compatibility
   server.on("/save", HTTP_GET, [](AsyncWebServerRequest *request){
     saveEEPROM();
     request->redirect("/");
   });
   
-  // Route to load style.css file
-  server.on("/style.css", HTTP_GET, [](AsyncWebServerRequest *request){
-    Serial.println("HTTP_GET /style.css");
-    request->send(SPIFFS, "/style.css", "text/css");
-  });
 
   server.addHandler(new CaptiveRequestHandler()).setFilter(ON_AP_FILTER);//only when requested from AP
 
   server.begin();
   Serial.println("=== Setup Complete - Web Server Started ===\n");
-  
-  #ifdef ESP32_DUAL_CORE
-    esp_task_wdt_reset();  // Final reset after setup
-  #endif
 }
 
 void loop(){
@@ -1421,20 +1533,20 @@ void loop(){
   static unsigned long lastTimeSync = 0;
   
   // Reset watchdog at start of loop
-  #ifdef ESP32_DUAL_CORE
-    esp_task_wdt_reset();
-  #endif
+  esp_task_wdt_reset();
   
   processOTA();
-  
-  // Always process DNS requests (AP is always active)
-  dnsServer.processNextRequest();
+
+  // Process DNS only in AP mode
+  if (apModeActive) {
+    dnsServer.processNextRequest();
+  }
   
   copyDataToDMXBuffer();
   
   dmx_wait_sent(dmxPort, DMX_TIMEOUT_TICK);
   dmx_write(dmxPort, dmxBuffer, DMX_PACKET_SIZE);
-  dmx_send(dmxPort, DMX_PACKET_SIZE);
+  dmx_send(dmxPort);
   
   loopCounter++;
   
@@ -1442,6 +1554,15 @@ void loop(){
   if (WiFi.status() == WL_CONNECTED && (millis() - lastTimeSync > 3600000)) {
     lastTimeSync = millis();
     initTime();
+  }
+
+  // STA-Verbindung überwachen, bei Verlust → AP
+  if (!apModeActive && millis() - lastWiFiCheck > 30000) {
+    lastWiFiCheck = millis();
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("WiFi lost, switching to AP mode");
+      switchToAPMode();
+    }
   }
   
   // Debug output every 10 seconds

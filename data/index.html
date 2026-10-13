@@ -7,6 +7,10 @@
 	<link rel="stylesheet" type="text/css" href="style.css">
 </head>
 <body>
+	<div id="connectionStatus" class="connection-indicator connected">
+		<span id="statusText">● Connected</span>
+	</div>
+	
 	<h1>Nutant Lamp is: <strong> %STATE%</strong></h1>
 	<div class ='circleBase' id='rotateMode'>
 
@@ -25,5 +29,57 @@
 	<p><a href="/channels"><button class="button button2">CHANNELS</button></a></p>
 	<p><a href="/save"><button class="button button2">SAVE</button></a></p>
 
+	<script>
+		let checkInterval;
+		let reconnectAttempts = 0;
+		const maxReconnectAttempts = 5;
+		
+		function checkConnection() {
+			fetch('/status', { 
+				method: 'GET',
+				cache: 'no-cache',
+				headers: { 'Cache-Control': 'no-cache' }
+			})
+			.then(response => {
+				if (response.ok) {
+					setConnectionStatus(true);
+					reconnectAttempts = 0;
+				} else {
+					setConnectionStatus(false);
+				}
+			})
+			.catch(error => {
+				setConnectionStatus(false);
+				reconnectAttempts++;
+				if (reconnectAttempts >= maxReconnectAttempts) {
+					document.getElementById('statusText').textContent = 
+						'● Disconnected - Reload page to reconnect';
+				}
+			});
+		}
+		
+		function setConnectionStatus(connected) {
+			const indicator = document.getElementById('connectionStatus');
+			const statusText = document.getElementById('statusText');
+			
+			if (connected) {
+				indicator.className = 'connection-indicator connected';
+				statusText.textContent = '● Connected';
+			} else {
+				indicator.className = 'connection-indicator disconnected';
+				if (reconnectAttempts < maxReconnectAttempts) {
+					statusText.textContent = '● Reconnecting... (' + reconnectAttempts + '/' + maxReconnectAttempts + ')';
+				} else {
+					statusText.textContent = '● Disconnected';
+				}
+			}
+		}
+		
+		// Check connection every 5 seconds
+		checkInterval = setInterval(checkConnection, 5000);
+		
+		// Initial check after 1 second
+		setTimeout(checkConnection, 1000);
+	</script>
 </body>
 </html>

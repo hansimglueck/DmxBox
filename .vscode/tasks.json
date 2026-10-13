@@ -5,6 +5,20 @@
 			"label": "Upload to ESP32-C3",
 			"type": "shell",
 			"command": "platformio run --target upload --environment esp32-c3-devkitm-1"
+		},
+		{
+			"label": "PlatformIO: Build (esp32dev)",
+			"type": "shell",
+			"command": "platformio",
+			"args": [
+				"run",
+				"--environment",
+				"esp32dev"
+			],
+			"problemMatcher": [
+				"$platformio"
+			],
+			"group": "build"
 		}
 	]
 }
