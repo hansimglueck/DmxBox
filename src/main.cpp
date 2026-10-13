@@ -844,33 +844,20 @@ void setup(){
   setupOTA(ssid, password);
   Serial.printf("Hostname: %s.local\n", ssid);
 
-  // DMX Setup - FIRST install driver, THEN set pins
-  Serial.println("Installing DMX driver...");
+  // DMX Setup
+  Serial.printf("DMX: port=%d TX=%d RX=%d DIR=%d\n",
+                dmxPort, DMX_SERIAL_OUTPUT_PIN, DMX_SERIAL_INPUT_PIN, DMX_DIRECTION_PIN);
   dmx_config_t config = DMX_CONFIG_DEFAULT;
-  esp_err_t err = dmx_driver_install(dmxPort, &config, NULL, 0);
-  if (err == ESP_OK) {
-    Serial.printf("DMX driver installed successfully on port %d\n", dmxPort);
-  } else {
-    Serial.printf("ERROR: DMX driver installation failed with code %d\n", err);
-  }
-  
-  Serial.printf("Setting DMX pins: TX=%d, RX=%d, DIR=%d\n", 
-                DMX_SERIAL_OUTPUT_PIN, DMX_SERIAL_INPUT_PIN, DMX_DIRECTION_PIN);
-  esp_err_t err = dmx_set_pin(dmxPort, DMX_SERIAL_OUTPUT_PIN, DMX_SERIAL_INPUT_PIN, DMX_DIRECTION_PIN);
-  if (err != ESP_OK) {
-    Serial.printf("ERROR: DMX pin setup failed with code %d - DMX functionality disabled\n", err);
-  } else {
-    Serial.println("DMX pins set successfully");
-    
-    Serial.printf("Installing DMX driver on port %d...\n", dmxPort);
-    dmx_config_t config = DMX_CONFIG_DEFAULT;
-    err = dmx_driver_install(dmxPort, &config, DMX_DEFAULT_INTR_FLAGS);
-    if (err == ESP_OK) {
-      Serial.printf("✓ DMX driver installed successfully on port %d\n", dmxPort);
+  bool dmxOk = dmx_driver_install(dmxPort, &config, NULL, 0);
+  if (dmxOk) {
+    esp_err_t pinErr = dmx_set_pin(dmxPort, DMX_SERIAL_OUTPUT_PIN, DMX_SERIAL_INPUT_PIN, DMX_DIRECTION_PIN);
+    if (pinErr != ESP_OK) {
+      Serial.printf("DMX pin setup failed: %d\n", pinErr);
     } else {
-      Serial.printf("✗ ERROR: DMX driver installation failed with code %d - DMX functionality disabled\n", err);
-      Serial.println("Web interface will continue to work for configuration");
+      Serial.println("DMX ready");
     }
+  } else {
+    Serial.println("DMX driver install failed");
   }
   Serial.println("setup dmx complete");
 
