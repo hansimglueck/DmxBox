@@ -5,7 +5,6 @@
 #include <EEPROM.h>
 #include <AsyncTCP.h>
 #include "ESPAsyncWebServer.h"
-#include "SPIFFS.h"
 #include <esp_dmx.h>
 #include <OTAWrapper.h>
 #include <time.h>  // Add time library
@@ -805,15 +804,6 @@ void setup(){
 
   esp_task_wdt_reset();  // Reset after WiFi setup complete
 
-  // Initialize SPIFFS
-  if(!SPIFFS.begin(true)){
-    Serial.println("An Error has occurred while mounting SPIFFS");
-    return;
-  }
-  Serial.println("SPIFFS mounted successfully");
-
-  esp_task_wdt_reset();  // Reset after SPIFFS
-
   // DMX Setup - FIRST install driver, THEN set pins
   Serial.println("Installing DMX driver...");
   dmx_config_t config = DMX_CONFIG_DEFAULT;
@@ -1450,11 +1440,6 @@ void setup(){
     request->redirect("/");
   });
   
-  // Route to load style.css file
-  server.on("/style.css", HTTP_GET, [](AsyncWebServerRequest *request){
-    Serial.println("HTTP_GET /style.css");
-    request->send(SPIFFS, "/style.css", "text/css");
-  });
 
   server.addHandler(new CaptiveRequestHandler()).setFilter(ON_AP_FILTER);//only when requested from AP
 
