@@ -8,6 +8,7 @@
 #include <esp_dmx.h>
 #include <OTAWrapper.h>
 #include <time.h>  // Add time library
+#include "display.h"
 
 // Fallback if DMX_DEFAULT_INTR_FLAGS is not defined in esp_dmx library
 #ifndef DMX_DEFAULT_INTR_FLAGS
@@ -29,6 +30,7 @@
 #endif
 
 dmx_port_t dmxPort = DMX_PORT;
+bool dmxReady = false;
 byte data[DMX_PACKET_SIZE];
 byte dmxBuffer[DMX_PACKET_SIZE];
 unsigned long lastUpdate = millis();
@@ -800,7 +802,9 @@ void setup(){
   Serial.begin(115200);
   delay(1000);
   Serial.println("\n\n=== DMX Box Starting ===");
-  
+  displayInit();
+  displayMessage("Starte...");
+
   // Configure watchdog timer FIRST (10 seconds timeout) - only for ESP32 dual-core
   esp_task_wdt_init(10, true);
   esp_task_wdt_add(NULL);
@@ -825,6 +829,7 @@ void setup(){
   bool wifiConnected = false;
   if (strlen(savedSSID) > 0) {
     Serial.printf("Connecting to: %s\n", savedSSID);
+    displayMessage("Verbinde mit WLAN:", savedSSID);
     WiFi.mode(WIFI_STA);
     wifiConnected = connectToWiFi(savedSSID, savedPassword);
   }
@@ -850,10 +855,10 @@ void setup(){
   dmx_config_t config = DMX_CONFIG_DEFAULT;
   bool dmxOk = dmx_driver_install(dmxPort, &config, NULL, 0);
   if (dmxOk) {
-    esp_err_t pinErr = dmx_set_pin(dmxPort, DMX_SERIAL_OUTPUT_PIN, DMX_SERIAL_INPUT_PIN, DMX_DIRECTION_PIN);
-    if (pinErr != ESP_OK) {
-      Serial.printf("DMX pin setup failed: %d\n", pinErr);
+    if (!dmx_set_pin(dmxPort, DMX_SERIAL_OUTPUT_PIN, DMX_SERIAL_INPUT_PIN, DMX_DIRECTION_PIN)) {
+      Serial.println("DMX pin setup failed");
     } else {
+      dmxReady = true;
       Serial.println("DMX ready");
     }
   } else {
@@ -1552,6 +1557,32 @@ void loop(){
     }
   }
   
+  static unsigned long lastDisplayUpdate = 0;
+  static unsigned long framesAtLastDisplay = 0;
+  if (millis() - lastDisplayUpdate >= 1000) {
+    unsigned long now = millis();
+    DisplayStatus st;
+    st.apMode = apModeActive;
+    st.ssid = apModeActive ? ssid : savedSSID;
+    st.ip = (apModeActive ? WiFi.softAPIP() : WiFi.localIP()).toString();
+    st.rssi = WiFi.RSSI();
+    st.apClients = WiFi.softAPgetStationNum();
+    st.dmxReady = dmxReady;
+    st.dmxActive = isDMXActiveTime();
+    st.fps = (loopCounter - framesAtLastDisplay) * 1000 / (now - lastDisplayUpdate);
+    struct tm t;
+    st.timeValid = timeInitialized && getLocalTime(&t, 0);
+    if (st.timeValid) {
+      char buf[9];
+      strftime(buf, sizeof(buf), "%H:%M:%S", &t);
+      st.time = buf;
+    }
+    st.uptimeMs = now;
+    displayUpdate(st);
+    framesAtLastDisplay = loopCounter;
+    lastDisplayUpdate = now;
+  }
+
   // Debug output every 10 seconds
   if (millis() - lastLoopDebug > 10000) {
     lastLoopDebug = millis();
