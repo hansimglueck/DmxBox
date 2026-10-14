@@ -6,17 +6,53 @@
 #define FIXTURE_NAME_MAX 32
 #define DMX_UNIVERSE_SIZE 512
 
+// Guards multi-byte updates of the DMX values (e.g. 16-bit coarse/fine) against the
+// copy into the output buffer, so a frame never mixes a new coarse with an old fine byte.
+extern portMUX_TYPE dmxDataMux;
+
 struct ChannelRange {
   uint8_t from;
   uint8_t to;
   String name;
 };
 
+// Feature groups as in grandMA2
+enum ChannelGroup : uint8_t {
+  GROUP_DIMMER = 0,
+  GROUP_POSITION,
+  GROUP_GOBO,
+  GROUP_COLOR,
+  GROUP_BEAM,
+  GROUP_FOCUS,
+  GROUP_CONTROL,
+  GROUP_COUNT
+};
+extern const char* const GROUP_NAMES[GROUP_COUNT];
+// Position and focus presets are stored per fixture, all others per fixture type.
+inline bool groupIsSelective(uint8_t g) { return g == GROUP_POSITION || g == GROUP_FOCUS; }
+int8_t parseGroupName(const String& s);  // -1 if not a group name
+uint8_t guessGroup(const String& type, const String& name);
+
 struct ChannelDef {
   String name;
   String type;
   std::vector<ChannelRange> ranges;
+  int16_t fine = -1;  // index of the fine (LSB) channel if this is a 16-bit coarse channel
+  int8_t group = -1;  // explicit group, -1 = guessed from type/name
 };
+
+// One control in the UI: a single channel or a 16-bit coarse/fine pair.
+struct FixtureControl {
+  uint16_t ch;
+  int16_t fine;  // -1 = 8 bit
+};
+
+// Pairs "X fine" with "X" (or type "fine:X") and fills ChannelDef::fine.
+// Explicit pairs that are already set are kept.
+void resolveFinePairs(std::vector<ChannelDef>& channels);
+// Same rule for plain channel name lists (generic fixtures); returns fine index per channel.
+std::vector<int16_t> finePairsFromNames(const std::vector<String>& names);
+std::vector<FixtureControl> controlsFromFine(const std::vector<int16_t>& fine);
 
 struct FixtureDef {
   uint16_t id = 0;
@@ -40,12 +76,25 @@ extern std::vector<Fixture> fixtureList;
 bool fixturesBegin();  // mounts LittleFS (formats on first use)
 void fixturesLoad();
 
+// Changes on every fixture/definition change (random start value per boot).
+uint16_t fixturesVersion();
+// Mutations run in the web server task; other tasks must hold this lock while reading.
+void fixturesLock();
+void fixturesUnlock();
+
 FixtureDef* findDef(uint16_t id);
 Fixture* findFixture(uint16_t id);
 
 uint16_t fixtureChannelCount(const Fixture& f);
 String fixtureChannelName(const Fixture& f, uint16_t ch);
 const ChannelDef* fixtureChannelDef(const Fixture& f, uint16_t ch);
+std::vector<int16_t> fixtureFinePairs(const Fixture& f);
+std::vector<FixtureControl> fixtureControls(const Fixture& f);
+// Group per channel (fine channels inherit the group of their coarse channel).
+std::vector<uint8_t> fixtureGroups(const Fixture& f);
+std::vector<uint8_t> groupsFor(const std::vector<String>& names, const std::vector<String>& types,
+                               const std::vector<int8_t>& explicitGroups, const std::vector<int16_t>& fine);
+void fixturesBumpVersion();  // presets etc. that the link should re-announce
 bool fixtureOverlaps(const Fixture& f);
 
 // Returns an empty string on success, otherwise an error message.

@@ -7,6 +7,17 @@ std::vector<Fixture> fixtureList;
 
 static uint16_t nextFixtureId = 1;
 static uint16_t nextDefId = 1;
+static uint16_t version = 0;
+static SemaphoreHandle_t fixMutex = nullptr;
+
+void fixturesLock() { xSemaphoreTakeRecursive(fixMutex, portMAX_DELAY); }
+void fixturesUnlock() { xSemaphoreGiveRecursive(fixMutex); }
+uint16_t fixturesVersion() { return version; }
+
+struct FixLock {
+  FixLock() { fixturesLock(); }
+  ~FixLock() { fixturesUnlock(); }
+};
 
 static const char* PATCH_FILE = "/patch.json";
 static const char* DEFS_DIR = "/defs";
@@ -37,13 +48,145 @@ static bool writeJsonFile(const String& path, JsonDocument& doc) {
 
 // ---------- JSON <-> model ----------
 
+// ---------- feature groups ----------
+
+const char* const GROUP_NAMES[GROUP_COUNT] = {"Dimmer", "Position", "Gobo", "Color", "Beam", "Focus", "Control"};
+
+int8_t parseGroupName(const String& s) {
+  String t = s;
+  t.trim();
+  for (uint8_t g = 0; g < GROUP_COUNT; g++) {
+    if (t.equalsIgnoreCase(GROUP_NAMES[g])) return g;
+  }
+  if (t.equalsIgnoreCase("Farbe") || t.equalsIgnoreCase("Colour")) return GROUP_COLOR;
+  return -1;
+}
+
+static bool containsAny(const String& s, const char* const* words) {
+  for (; *words; words++) {
+    if (s.indexOf(*words) >= 0) return true;
+  }
+  return false;
+}
+
+uint8_t guessGroup(const String& type, const String& name) {
+  static const char* const control[] = {"speed", "time", "reset", "lamp", "macro", "makro", "function",
+                                        "mode", "control", "special", nullptr};
+  static const char* const position[] = {"pan", "tilt", "position", nullptr};
+  static const char* const focus[] = {"focus", "zoom", nullptr};
+  static const char* const dimmer[] = {"dimmer", "intensity", "master", nullptr};
+  static const char* const color[] = {"color", "colour", "farbe", "red", "green", "blue", "white", "amber",
+                                      "cyan", "magenta", "yellow", "cto", "ctb", "hue", "saturation", "rgb", nullptr};
+  static const char* const gobo[] = {"gobo", "animation", "effect", nullptr};
+  static const char* const beam[] = {"shutter", "strobe", "prism", "frost", "iris", "beam", nullptr};
+  static const char* const* order[] = {control, position, focus, dimmer, color, gobo, beam};
+  static const uint8_t groups[] = {GROUP_CONTROL, GROUP_POSITION, GROUP_FOCUS, GROUP_DIMMER,
+                                   GROUP_COLOR, GROUP_GOBO, GROUP_BEAM};
+  String t = type, n = name;
+  t.toLowerCase();
+  n.toLowerCase();
+  for (const String& s : {t, n}) {
+    if (s.isEmpty()) continue;
+    for (size_t i = 0; i < sizeof(groups); i++) {
+      if (containsAny(s, order[i])) return groups[i];
+    }
+  }
+  return GROUP_CONTROL;
+}
+
+std::vector<uint8_t> groupsFor(const std::vector<String>& names, const std::vector<String>& types,
+                               const std::vector<int8_t>& explicitGroups, const std::vector<int16_t>& fine) {
+  size_t n = names.size();
+  std::vector<uint8_t> g(n);
+  for (size_t i = 0; i < n; i++) {
+    int8_t e = i < explicitGroups.size() ? explicitGroups[i] : -1;
+    g[i] = e >= 0 ? e : guessGroup(i < types.size() ? types[i] : String(""), names[i]);
+  }
+  for (size_t i = 0; i < n && i < fine.size(); i++) {
+    if (fine[i] >= 0 && (size_t)fine[i] < n) g[fine[i]] = g[i];
+  }
+  return g;
+}
+
+// "Pan fine" / "Pan Fine" / "Pan_fine" / "PanFine" -> "Pan"; "" if not a fine-style name
+static String fineBaseName(String name) {
+  name.trim();
+  if (name.length() <= 4) return "";
+  String tail = name.substring(name.length() - 4);
+  tail.toLowerCase();
+  if (tail != "fine") return "";
+  String base = name.substring(0, name.length() - 4);
+  while (base.length() && (base.endsWith(" ") || base.endsWith("_") || base.endsWith("-"))) {
+    base.remove(base.length() - 1);
+  }
+  return base;
+}
+
+void resolveFinePairs(std::vector<ChannelDef>& channels) {
+  size_t n = channels.size();
+  std::vector<bool> isFine(n, false);
+  for (size_t i = 0; i < n; i++) {
+    int16_t f = channels[i].fine;
+    if (f < 0 || (size_t)f >= n || (size_t)f == i || isFine[f]) channels[i].fine = -1;
+    else isFine[f] = true;
+  }
+  for (size_t i = 0; i < n; i++) {
+    if (isFine[i] || channels[i].fine >= 0) continue;
+    String type = channels[i].type;
+    type.trim();
+    String tl = type;
+    tl.toLowerCase();
+    String base;
+    if (tl.startsWith("fine:")) {
+      base = type.substring(5);
+      base.trim();
+    } else if (tl.isEmpty() || tl == "fine" || tl.endsWith("_fine") || tl.endsWith(" fine")) {
+      base = fineBaseName(channels[i].name);
+    }
+    if (base.isEmpty()) continue;
+    for (size_t j = 0; j < n; j++) {
+      if (j == i || isFine[j] || channels[j].fine >= 0) continue;
+      if (channels[j].name.equalsIgnoreCase(base)) {
+        channels[j].fine = i;
+        isFine[i] = true;
+        break;
+      }
+    }
+  }
+}
+
+std::vector<int16_t> finePairsFromNames(const std::vector<String>& names) {
+  std::vector<ChannelDef> tmp(names.size());
+  for (size_t i = 0; i < names.size(); i++) tmp[i].name = names[i];
+  resolveFinePairs(tmp);
+  std::vector<int16_t> fine(names.size());
+  for (size_t i = 0; i < names.size(); i++) fine[i] = tmp[i].fine;
+  return fine;
+}
+
+std::vector<FixtureControl> controlsFromFine(const std::vector<int16_t>& fine) {
+  std::vector<bool> isFine(fine.size(), false);
+  for (int16_t f : fine) if (f >= 0 && (size_t)f < fine.size()) isFine[f] = true;
+  std::vector<FixtureControl> out;
+  for (size_t i = 0; i < fine.size(); i++) {
+    if (!isFine[i]) out.push_back({(uint16_t)i, fine[i]});
+  }
+  return out;
+}
+
 static void parseChannels(JsonArrayConst arr, std::vector<ChannelDef>& out) {
-  std::vector<std::pair<int, ChannelDef>> tmp;
+  struct Tmp {
+    int index;
+    int fineRef;
+    ChannelDef ch;
+  };
+  std::vector<Tmp> tmp;
   bool allIndexed = true;
   for (JsonObjectConst c : arr) {
     ChannelDef ch;
     ch.name = clip(c["name"] | "", FIXTURE_NAME_MAX);
     ch.type = clip(c["type"] | "", FIXTURE_NAME_MAX);
+    ch.group = parseGroupName(c["group"] | "");
     for (JsonObjectConst r : c["ranges"].as<JsonArrayConst>()) {
       int from = constrain((int)(r["from"] | 0), 0, 255);
       int to = constrain((int)(r["to"] | from), 0, 255);
@@ -57,18 +200,28 @@ static void parseChannels(JsonArrayConst arr, std::vector<ChannelDef>& out) {
     }
     int index = c["index"] | 0;
     if (index <= 0) allIndexed = false;
-    tmp.push_back({index, ch});
+    tmp.push_back({index, c["fine"] | 0, ch});
   }
   if (allIndexed) {
-    std::stable_sort(tmp.begin(), tmp.end(),
-                     [](const std::pair<int, ChannelDef>& a, const std::pair<int, ChannelDef>& b) {
-                       return a.first < b.first;
-                     });
+    std::stable_sort(tmp.begin(), tmp.end(), [](const Tmp& a, const Tmp& b) { return a.index < b.index; });
   }
+  size_t base = out.size();
   for (size_t i = 0; i < tmp.size(); i++) {
-    if (tmp[i].second.name.isEmpty()) tmp[i].second.name = "Ch " + String(i + 1);
-    out.push_back(tmp[i].second);
+    if (tmp[i].ch.name.isEmpty()) tmp[i].ch.name = "Ch " + String(i + 1);
+    out.push_back(tmp[i].ch);
   }
+  // "fine" refers to the 1-based "index" of the fine channel (labX / DmxBox export)
+  for (size_t i = 0; i < tmp.size(); i++) {
+    int ref = tmp[i].fineRef;
+    if (ref <= 0) continue;
+    for (size_t j = 0; j < tmp.size(); j++) {
+      if (allIndexed ? tmp[j].index == ref : (int)j + 1 == ref) {
+        out[base + i].fine = j;
+        break;
+      }
+    }
+  }
+  resolveFinePairs(out);
 }
 
 void defToJson(const FixtureDef& d, JsonObject obj) {
@@ -83,6 +236,12 @@ void defToJson(const FixtureDef& d, JsonObject obj) {
     c["index"] = i + 1;
     c["name"] = ch.name;
     if (!ch.type.isEmpty()) c["type"] = ch.type;
+    if (ch.fine >= 0) c["fine"] = ch.fine + 1;
+    if (ch.group >= 0) {
+      String g = GROUP_NAMES[ch.group];
+      g.toLowerCase();
+      c["group"] = g;
+    }
     if (!ch.ranges.empty()) {
       JsonArray rs = c["ranges"].to<JsonArray>();
       for (const ChannelRange& r : ch.ranges) {
@@ -123,6 +282,8 @@ static bool writeDef(const FixtureDef& d) {
 }
 
 bool fixturesBegin() {
+  fixMutex = xSemaphoreCreateRecursiveMutex();
+  version = esp_random() & 0xFFFF;
   if (!LittleFS.begin(true)) {
     Serial.println("LittleFS mount failed");
     return false;
@@ -232,6 +393,45 @@ const ChannelDef* fixtureChannelDef(const Fixture& f, uint16_t ch) {
   return &d->channels[ch];
 }
 
+std::vector<int16_t> fixtureFinePairs(const Fixture& f) {
+  if (f.defId != 0) {
+    const FixtureDef* d = findDef(f.defId);
+    std::vector<int16_t> fine;
+    if (d) for (const ChannelDef& c : d->channels) fine.push_back(c.fine);
+    return fine;
+  }
+  std::vector<String> names;
+  for (uint16_t i = 0; i < f.channelCount; i++) names.push_back(fixtureChannelName(f, i));
+  return finePairsFromNames(names);
+}
+
+std::vector<FixtureControl> fixtureControls(const Fixture& f) {
+  return controlsFromFine(fixtureFinePairs(f));
+}
+
+std::vector<uint8_t> fixtureGroups(const Fixture& f) {
+  std::vector<String> names, types;
+  std::vector<int8_t> explicitGroups;
+  if (f.defId != 0) {
+    const FixtureDef* d = findDef(f.defId);
+    if (d) {
+      for (const ChannelDef& c : d->channels) {
+        names.push_back(c.name);
+        types.push_back(c.type);
+        explicitGroups.push_back(c.group);
+      }
+    }
+  } else {
+    for (uint16_t i = 0; i < f.channelCount; i++) names.push_back(fixtureChannelName(f, i));
+  }
+  return groupsFor(names, types, explicitGroups, fixtureFinePairs(f));
+}
+
+void fixturesBumpVersion() {
+  FixLock lock;
+  version++;
+}
+
 bool fixtureOverlaps(const Fixture& f) {
   int a1 = f.address, a2 = f.address + fixtureChannelCount(f) - 1;
   for (const Fixture& g : fixtureList) {
@@ -245,6 +445,8 @@ bool fixtureOverlaps(const Fixture& f) {
 // ---------- mutations ----------
 
 String saveFixture(Fixture& f) {
+  FixLock lock;
+  version++;
   f.name = clip(f.name, FIXTURE_NAME_MAX);
   if (f.defId != 0 && !findDef(f.defId)) return "Definition nicht gefunden";
   if (f.defId == 0 && (f.channelCount < 1 || f.channelCount > DMX_UNIVERSE_SIZE)) {
@@ -280,6 +482,8 @@ String saveFixture(Fixture& f) {
 }
 
 String deleteFixture(uint16_t id) {
+  FixLock lock;
+  version++;
   auto it = std::find_if(fixtureList.begin(), fixtureList.end(), [id](const Fixture& f) { return f.id == id; });
   if (it == fixtureList.end()) return "Fixture nicht gefunden";
   fixtureList.erase(it);
@@ -288,6 +492,8 @@ String deleteFixture(uint16_t id) {
 }
 
 String saveDef(FixtureDef& d) {
+  FixLock lock;
+  version++;
   d.name = clip(d.name, FIXTURE_NAME_MAX);
   d.manufacturer = clip(d.manufacturer, FIXTURE_NAME_MAX);
   if (d.name.isEmpty()) return "Name fehlt";
@@ -316,6 +522,8 @@ String saveDef(FixtureDef& d) {
 }
 
 String deleteDef(uint16_t id) {
+  FixLock lock;
+  version++;
   if (!findDef(id)) return "Definition nicht gefunden";
   String users;
   for (const Fixture& f : fixtureList) {
@@ -392,9 +600,17 @@ static String sanitizeText(String s) {
 
 String defChannelsToText(const FixtureDef& d) {
   String out;
-  for (const ChannelDef& ch : d.channels) {
+  for (size_t idx = 0; idx < d.channels.size(); idx++) {
+    const ChannelDef& ch = d.channels[idx];
+    String type = ch.type;
+    if (ch.group >= 0 && ch.group != guessGroup(ch.type, ch.name)) {
+      type = String(GROUP_NAMES[ch.group]) + (ch.type.isEmpty() ? "" : "/" + ch.type);
+    }
+    for (const ChannelDef& coarse : d.channels) {
+      if (coarse.fine == (int16_t)idx) type = "fine:" + coarse.name;  // keeps the pairing explicit
+    }
     out += sanitizeText(ch.name);
-    if (!ch.type.isEmpty() || !ch.ranges.empty()) out += " | " + sanitizeText(ch.type);
+    if (!type.isEmpty() || !ch.ranges.empty()) out += " | " + sanitizeText(type);
     if (!ch.ranges.empty()) {
       out += " | ";
       for (size_t i = 0; i < ch.ranges.size(); i++) {
@@ -468,7 +684,17 @@ String defChannelsFromText(const String& text, FixtureDef& d) {
     std::vector<String> parts = split(line, '|');
     ChannelDef ch;
     ch.name = clip(parts[0], FIXTURE_NAME_MAX);
-    if (parts.size() > 1) ch.type = clip(parts[1], FIXTURE_NAME_MAX);
+    if (parts.size() > 1) {
+      ch.type = clip(parts[1], FIXTURE_NAME_MAX);
+      // "Color/wheel" or just "Color" sets the group explicitly
+      int slash = ch.type.indexOf('/');
+      int8_t g = parseGroupName(slash >= 0 ? ch.type.substring(0, slash) : ch.type);
+      if (g >= 0) {
+        ch.group = g;
+        ch.type = slash >= 0 ? ch.type.substring(slash + 1) : String("");
+        ch.type.trim();
+      }
+    }
     if (parts.size() > 2) {
       for (String tok : split(parts[2], ';')) {
         tok.trim();
@@ -482,6 +708,7 @@ String defChannelsFromText(const String& text, FixtureDef& d) {
     if (ch.name.isEmpty()) ch.name = "Ch " + String(chans.size() + 1);
     chans.push_back(ch);
   }
+  resolveFinePairs(chans);
   d.channels = chans;
   return "";
 }

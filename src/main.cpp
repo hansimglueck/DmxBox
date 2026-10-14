@@ -10,7 +10,12 @@
 #include <time.h>  // Add time library
 #include "display.h"
 #include "fixtures.h"
+#include "presets.h"
 #include "fixture_web.h"
+#ifdef HAS_LORA
+#include "sync.h"
+#include "sync_web.h"
+#endif
 
 // Fallback if DMX_DEFAULT_INTR_FLAGS is not defined in esp_dmx library
 #ifndef DMX_DEFAULT_INTR_FLAGS
@@ -34,6 +39,7 @@
 dmx_port_t dmxPort = DMX_PORT;
 bool dmxReady = false;
 byte data[DMX_PACKET_SIZE];
+portMUX_TYPE dmxDataMux = portMUX_INITIALIZER_UNLOCKED;
 byte dmxBuffer[DMX_PACKET_SIZE];
 unsigned long lastUpdate = millis();
 
@@ -447,6 +453,7 @@ void copyDataToDMXBuffer() {
   
   bool dmxActive = isDMXActiveTime();
   
+  portENTER_CRITICAL(&dmxDataMux);
   for (int i=0; i<=511; i++) {  
     if (dmxActive) {
       dmxBuffer[i+1] = data[i+1];
@@ -454,7 +461,8 @@ void copyDataToDMXBuffer() {
       dmxBuffer[i+1] = 0;  // All channels to 0 when inactive
     }
   }
-  
+  portEXIT_CRITICAL(&dmxDataMux);
+
   // if data[ctrlChannel] == lampOnValue then toggle dmxBuffer[ctrlChannel] every 6 seconds between 0 and lampOnValue
   if (dmxActive && data[controlChannel] == lampOnValue) {
     if (millis() - lastLampToggle > 6000) {
@@ -622,6 +630,16 @@ void setup(){
   displayInit();
   displayMessage("Starte...");
 
+#ifdef HOSTNAME_MAC_SUFFIX
+  // several boxes share one firmware: make hostname / AP SSID unique per board
+  static char uniqueName[48];
+  uint64_t mac = ESP.getEfuseMac();
+  snprintf(uniqueName, sizeof(uniqueName), "%s-%02x%02x", WIFI_SSID,
+           (unsigned)((mac >> 32) & 0xFF), (unsigned)((mac >> 40) & 0xFF));
+  ssid = uniqueName;
+  Serial.printf("Box name: %s\n", ssid);
+#endif
+
   // Mount before the watchdog starts: the first-time format can take several seconds
   fixturesBegin();
 
@@ -686,24 +704,41 @@ void setup(){
   }
   Serial.println("setup dmx complete");
 
-  pinMode(2, OUTPUT);
+#ifndef HAS_LORA
+  pinMode(2, OUTPUT);  // GPIO2 is the LoRa PA enable on the Heltec V4
+#endif
 
   // Load all 512 DMX channels from EEPROM
-  for (int i = 1; i <= 512; i++) {  
+  bool allErased = true;
+  for (int i = 1; i <= 512; i++) {
     data[i] = EEPROM.read(EEPROM_DMX_START + i);
-    
+    if (data[i] != 0xFF) allErased = false;
+
     // Reset watchdog every 128 channels
     if (i % 128 == 0) {
       esp_task_wdt_reset();
     }
   }
-  Serial.println("Loaded 512 DMX channels from EEPROM");
+  // A fresh board reads erased flash (0xFF): never start with every channel at full
+  if (allErased) {
+    memset(data + 1, 0, 512);
+    Serial.println("EEPROM uninitialized, DMX channels start at 0");
+  } else {
+    Serial.println("Loaded 512 DMX channels from EEPROM");
+  }
   
   fixturesLoad();
+  presetsLoad();
+#ifdef HAS_LORA
+  syncBegin(ssid);
+#endif
 
   Serial.println("setup ap complete");
 
   registerFixtureRoutes(server);
+#ifdef HAS_LORA
+  registerSyncRoutes(server);
+#endif
 
   server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request){
     AsyncResponseStream *response = request->beginResponseStream("application/json");
@@ -749,6 +784,29 @@ void setup(){
     }
 
     html += "<br>Hostname: <strong>" + String(ssid) + ".local</strong>";
+#ifdef HAS_LORA
+    {
+      LinkSettings ls = syncSettings();
+      html += "<br><br>📡 <strong>LoRa:</strong> ";
+      if (!ls.enabled) {
+        html += "<span style='color: #f44336;'>aus</span>";
+      } else {
+        String online;
+        int count = 0;
+        for (const PeerInfo& p : syncPeers()) {
+          if (!p.online()) continue;
+          online += (count ? ", " : "") + p.name + " (" + String((int)p.rssi) + " dBm)";
+          count++;
+        }
+        if (count == 0) {
+          html += "<span style='color: #ff9800;'>allein</span>";
+        } else {
+          html += "<span style='color: #4CAF50;'>" + String(count + 1) + " Boxen</span><br>Verbunden mit: " + online;
+        }
+      }
+      html += " · <a href='/link'>Verbund</a>";
+    }
+#endif
     
     // JSON response with HTML content
     response->print("{\"html\":\"");
@@ -1107,6 +1165,9 @@ void loop(){
   esp_task_wdt_reset();
   
   processOTA();
+#ifdef HAS_LORA
+  syncLoop();
+#endif
 
   // Process DNS only in AP mode
   if (apModeActive) {
@@ -1157,6 +1218,9 @@ void loop(){
       st.time = buf;
     }
     st.uptimeMs = now;
+#ifdef HAS_LORA
+    st.linkPeers = syncOnlinePeers();
+#endif
     displayUpdate(st);
     framesAtLastDisplay = loopCounter;
     lastDisplayUpdate = now;

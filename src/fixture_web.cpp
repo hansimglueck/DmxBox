@@ -1,5 +1,9 @@
 #include "fixture_web.h"
 #include "fixtures.h"
+#include "fader_ui.h"
+#ifdef HAS_LORA
+#include "sync_web.h"
+#endif
 #include <ArduinoJson.h>
 
 extern uint8_t data[];
@@ -28,7 +32,7 @@ textarea{font-family:monospace;font-size:15px}
 .help{font-size:14px;color:#888;text-align:left;max-width:600px;margin:6px auto}
 )CSS";
 
-static String esc(const String& s) {
+String esc(const String& s) {
   String o;
   o.reserve(s.length() + 8);
   for (size_t i = 0; i < s.length(); i++) {
@@ -45,17 +49,17 @@ static String esc(const String& s) {
   return o;
 }
 
-static bool hasArg(AsyncWebServerRequest* r, const char* name) {
+bool hasArg(AsyncWebServerRequest* r, const char* name) {
   return r->hasParam(name, true) || r->hasParam(name);
 }
 
-static String arg(AsyncWebServerRequest* r, const char* name) {
+String arg(AsyncWebServerRequest* r, const char* name) {
   if (r->hasParam(name, true)) return r->getParam(name, true)->value();
   if (r->hasParam(name)) return r->getParam(name)->value();
   return "";
 }
 
-static AsyncResponseStream* pageBegin(AsyncWebServerRequest* req, const String& title, const char* extraHead = nullptr) {
+AsyncResponseStream* pageBegin(AsyncWebServerRequest* req, const String& title, const char* extraHead) {
   AsyncResponseStream* r = req->beginResponseStream("text/html");
   r->print("<!DOCTYPE html><html><head><meta charset='UTF-8'>"
            "<meta name='viewport' content='width=device-width, initial-scale=1'>"
@@ -69,12 +73,12 @@ static AsyncResponseStream* pageBegin(AsyncWebServerRequest* req, const String& 
   return r;
 }
 
-static void pageEnd(AsyncWebServerRequest* req, AsyncResponseStream* r) {
+void pageEnd(AsyncWebServerRequest* req, AsyncResponseStream* r) {
   r->print("</body></html>");
   req->send(r);
 }
 
-static void sendMessage(AsyncWebServerRequest* req, int code, const String& title, const String& msg) {
+void sendMessage(AsyncWebServerRequest* req, int code, const String& title, const String& msg) {
   AsyncResponseStream* r = pageBegin(req, title);
   r->setCode(code);
   r->printf("<h1 class='%s'>%s</h1>", code >= 400 ? "err" : "", esc(title).c_str());
@@ -137,8 +141,14 @@ void sendFixturesPage(AsyncWebServerRequest* request) {
   r->print("</div><div>");
   r->print("<a href='/fixture/edit'><button class='button'>+ Fixture</button></a>");
   r->print("<a href='/defs'><button class='button b-grey'>📋 Definitionen</button></a>");
+#ifdef HAS_LORA
+  r->print("<a href='/link'><button class='button b-grey'>📡 Verbund</button></a>");
+#endif
   r->print("</div>");
 
+#ifdef HAS_LORA
+  renderLocalBoxHeader(r);
+#endif
   if (fixtureList.empty()) {
     r->print("<p>Noch keine Fixtures angelegt.</p>");
   }
@@ -151,6 +161,9 @@ void sendFixturesPage(AsyncWebServerRequest* request) {
     r->printf("<a href='/fixture/edit?id=%u'><button class='button b-blue'>Bearbeiten</button></a>", f.id);
     r->print("</div>");
   }
+#ifdef HAS_LORA
+  renderRemoteFixtures(r);
+#endif
   pageEnd(request, r);
 }
 
@@ -218,7 +231,9 @@ static void handleFixtureDelete(AsyncWebServerRequest* req) {
   Fixture* f = findFixture(arg(req, "id").toInt());
   if (!f) return sendMessage(req, 404, "Nicht gefunden", "Fixture existiert nicht.");
   if (arg(req, "confirm") == "1") {
-    String err = deleteFixture(f->id);
+    uint16_t deletedId = f->id;
+    String err = deleteFixture(deletedId);
+    if (err.isEmpty()) presetsFixtureDeleted(deletedId);
     if (!err.isEmpty()) return sendMessage(req, 500, "Fehler", err);
     return req->redirect("/");
   }
@@ -233,11 +248,34 @@ static void handleFixtureDelete(AsyncWebServerRequest* req) {
 
 // ---------------- fixture channels ----------------
 
+static String fixtureValuesJson(const Fixture& f) {
+  String s = "[";
+  uint16_t n = fixtureChannelCount(f);
+  for (uint16_t i = 0; i < n; i++) {
+    uint16_t dmx = f.address + i;
+    if (i) s += ",";
+    s += String(dmx <= DMX_UNIVERSE_SIZE ? data[dmx] : 0);
+  }
+  return s + "]";
+}
+
+static String fixtureRefsJson(const Fixture& f) {
+  String s = "{";
+  bool first = true;
+  for (const PresetRef& r : presetRefs()) {
+    if (r.fixtureId != f.id) continue;
+    if (!first) s += ",";
+    s += "\"" + String(r.group) + "\":" + String(r.presetId);
+    first = false;
+  }
+  return s + "}";
+}
+
 static void handleFixturePage(AsyncWebServerRequest* req) {
   Fixture* fp = findFixture(arg(req, "id").toInt());
   if (!fp) return req->redirect("/");
   const Fixture& f = *fp;
-  AsyncResponseStream* r = pageBegin(req, f.name);
+  AsyncResponseStream* r = pageBegin(req, f.name, FADER_HEAD);
   r->printf("<h1>%s</h1>", esc(f.name).c_str());
   r->printf("<p>%s · %s</p>", dmxRangeLabel(f).c_str(), esc(fixtureTypeLabel(f)).c_str());
   r->print("<p><a href='/'>← Zurück</a></p>");
@@ -245,18 +283,72 @@ static void handleFixturePage(AsyncWebServerRequest* req) {
   if (f.defId == 0) {
     r->printf("<a href='/fixturenames?id=%u'><button class='button b-blue'>Kanalnamen</button></a>", f.id);
   }
-  uint16_t n = fixtureChannelCount(f);
-  for (uint16_t i = 0; i < n; i++) {
-    uint16_t dmx = f.address + i;
-    if (dmx < 1 || dmx > DMX_UNIVERSE_SIZE) continue;
-    const ChannelRange* cr = rangeForValue(fixtureChannelDef(f, i), data[dmx]);
-    r->print("<div class='channel'>");
-    r->printf("<span class='ch-name'>%s</span>", esc(fixtureChannelName(f, i)).c_str());
-    r->printf("<a href='/channel?fix=%u&ch=%u'>DMX %u</a>", f.id, i, dmx);
-    if (cr && !cr->name.isEmpty()) r->printf("<span class='ch-range'>%s</span>", esc(cr->name).c_str());
-    r->printf("<span class='ch-val'>%u</span></div>", data[dmx]);
+  String id = String(f.id);
+  std::vector<uint8_t> groups = fixtureGroups(f);
+  std::vector<uint8_t> present = groupsPresent(groups);
+  faderTabs(r, present);
+  FaderGrid grid;
+  grid.setUrl = "/api/channel/set?fix=" + id;
+  grid.getUrl = "/api/channel/values?fix=" + id;
+  grid.presetUrl = "/api/preset?fix=" + id;
+  grid.valuesJson = fixtureValuesJson(f);
+  grid.refsJson = fixtureRefsJson(f);
+  faderGridBegin(r, grid);
+  for (const FixtureControl& c : fixtureControls(f)) {
+    const ChannelDef* cdef = fixtureChannelDef(f, c.ch);
+    faderCard(r, fixtureChannelName(f, c.ch), "/channel?fix=" + id + "&ch=" + String(c.ch), c.ch, c.fine,
+              c.ch < groups.size() ? groups[c.ch] : GROUP_CONTROL, f.address + c.ch,
+              c.fine >= 0 ? f.address + c.fine : -1, cdef ? &cdef->ranges : nullptr);
   }
+  faderGridEnd(r);
+  for (uint8_t g : present) faderPresetPanel(r, g, presetsFor(f, g), presetActive(f.id, g));
+  faderScript(r);
   pageEnd(req, r);
+}
+
+static void handleChannelValuesApi(AsyncWebServerRequest* req) {
+  Fixture* fp = findFixture(arg(req, "fix").toInt());
+  if (!fp) return req->send(404, "application/json", "{}");
+  req->send(200, "application/json",
+            "{\"v\":" + fixtureValuesJson(*fp) + ",\"r\":" + fixtureRefsJson(*fp) + "}");
+}
+
+static void handlePresetApi(AsyncWebServerRequest* req) {
+  Fixture* fp = findFixture(arg(req, "fix").toInt());
+  if (!fp) return req->send(404, "text/plain", "Fixture nicht gefunden");
+  String op = arg(req, "op");
+  uint16_t pid = arg(req, "p").toInt();
+  String err;
+  if (op == "recall") err = presetRecall(fp->id, pid);
+  else if (op == "store") err = presetStore(fp->id, pid);
+  else if (op == "create") err = presetCreate(fp->id, arg(req, "g").toInt(), arg(req, "name"));
+  else if (op == "rename") err = presetRename(pid, arg(req, "name"));
+  else if (op == "delete") err = presetDelete(pid);
+  else err = "Unbekannte Aktion";
+  if (!err.isEmpty()) return req->send(400, "text/plain", err);
+  req->send(200, "text/plain", "ok");
+}
+
+static void handleChannelSetApi(AsyncWebServerRequest* req) {
+  Fixture* fp = findFixture(arg(req, "fix").toInt());
+  int ch = arg(req, "ch").toInt();
+  if (!fp || ch < 0 || ch >= fixtureChannelCount(*fp) || !hasArg(req, "v")) return req->send(400, "text/plain", "bad request");
+  std::vector<int16_t> fine = fixtureFinePairs(*fp);
+  long v = arg(req, "v").toInt();
+  uint16_t dmx = fp->address + ch;
+  if (ch < (int)fine.size() && fine[ch] >= 0) {
+    v = constrain(v, 0, 65535);
+    uint16_t fineDmx = fp->address + fine[ch];
+    portENTER_CRITICAL(&dmxDataMux);
+    if (dmx <= DMX_UNIVERSE_SIZE) data[dmx] = v >> 8;
+    if (fineDmx <= DMX_UNIVERSE_SIZE) data[fineDmx] = v & 0xFF;
+    portEXIT_CRITICAL(&dmxDataMux);
+  } else if (dmx <= DMX_UNIVERSE_SIZE) {
+    data[dmx] = constrain(v, 0, 255);
+  }
+  uint16_t last = (ch < (int)fine.size() && fine[ch] >= 0) ? max(dmx, (uint16_t)(fp->address + fine[ch])) : dmx;
+  presetChannelsChanged(min(dmx, last), last);
+  req->send(200, "text/plain", "ok");
 }
 
 static void renderChannel(AsyncWebServerRequest* req, const Fixture& f, int ch) {
@@ -316,8 +408,10 @@ static void handleChannel(AsyncWebServerRequest* req) {
 
   if (hasArg(req, "val")) {
     data[dmx] = constrain(arg(req, "val").toInt(), 0, 255);
+    presetChannelsChanged(dmx, dmx);
   } else if (hasArg(req, "delta")) {
     data[dmx] = constrain((int)data[dmx] + arg(req, "delta").toInt(), 0, 255);
+    presetChannelsChanged(dmx, dmx);
   }
   if (hasArg(req, "name") && fp->defId == 0) {
     Fixture copy = *fp;
@@ -503,7 +597,7 @@ function oflConvert(o){
   const av=o.availableChannels||{};
   const fineOf={};
   for(const k in av)(av[k].fineChannelAliases||[]).forEach(a=>fineOf[a]=k);
-  const modes=(o.modes||[]).map(m=>({name:m.shortName||m.name||'',channels:(m.channels||[]).map((key,i)=>{
+  const modes=(o.modes||[]).map(m=>{const keys=m.channels||[];const chans=keys.map((key,i)=>{
     const c={index:i+1};
     if(typeof key!=='string'){c.name='(nicht unterstützt)';return c;}
     c.name=key;
@@ -514,7 +608,9 @@ function oflConvert(o){
     if(caps.length&&caps[0].type)c.type=caps[0].type.toLowerCase();
     const div=ch.dmxValueResolution==='16bit'?256:ch.dmxValueResolution==='24bit'?65536:1;
     if(ch.capabilities)c.ranges=ch.capabilities.filter(x=>Array.isArray(x.dmxRange)).map(x=>({from:Math.floor(x.dmxRange[0]/div),to:Math.floor(x.dmxRange[1]/div),name:oflCapName(x)}));
-    return c;})}));
+    return c;});
+    keys.forEach((key,i)=>{if(typeof key==='string'&&fineOf[key]){const ci=keys.indexOf(fineOf[key]);if(ci>=0)chans[ci].fine=i+1;}});
+    return {name:m.shortName||m.name||'',channels:chans};});
   const mf=(o.manufacturer&&o.manufacturer.name)||o.manufacturerKey||'';
   return {name:o.name||'Import',manufacturer:mf,modes};
 }
@@ -596,6 +692,9 @@ void registerFixtureRoutes(AsyncWebServer& server) {
   server.on("/def/delete", HTTP_GET, handleDefDelete);
   server.on("/def/export", HTTP_GET, handleDefExport);
   server.on("/api/defs/import", HTTP_POST, handleImportApi);
+  server.on("/api/channel/values", HTTP_GET, handleChannelValuesApi);
+  server.on("/api/channel/set", HTTP_ANY, handleChannelSetApi);
+  server.on("/api/preset", HTTP_ANY, handlePresetApi);
   // registered last: "/fixture" would otherwise also match "/fixture/..." prefixes
   server.on("/fixture", HTTP_GET, handleFixturePage);
 }

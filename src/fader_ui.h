@@ -1,0 +1,31 @@
+#pragma once
+#include <ESPAsyncWebServer.h>
+#include <vector>
+#include "fixtures.h"
+#include "presets.h"
+
+// Fader grid (vertical drag encoders, modelled on the labX DMX plugin) with
+// grandMA2-style group tabs and preset bars.
+//   getUrl    -> {"v":[channel values], "p":[pending flags], "r":{"<group>":<presetId>}}
+//   setUrl    + "&ch=<channel>&v=<value>"            (16-bit value for coarse/fine pairs)
+//   presetUrl + "&op=recall|store|create|rename|delete&g=<group>&p=<id>&name=<name>"
+extern const char FADER_HEAD[];
+
+struct FaderGrid {
+  String setUrl, getUrl, presetUrl;
+  uint32_t pollMs = 1500;
+  uint32_t reloadDelayMs = 0;  // remote boxes need time until the change comes back over the link
+  String valuesJson;           // initial channel values (index = channel)
+  String refsJson = "{}";      // initial active presets {"<group>": presetId}
+};
+
+void faderTabs(AsyncResponseStream* r, const std::vector<uint8_t>& groupsPresent);
+void faderGridBegin(AsyncResponseStream* r, const FaderGrid& g);
+void faderCard(AsyncResponseStream* r, const String& name, const String& detailUrl, uint16_t ch, int16_t fine,
+               uint8_t group, uint16_t address, int16_t fineAddress, const std::vector<ChannelRange>* ranges);
+void faderGridEnd(AsyncResponseStream* r);
+void faderPresetPanel(AsyncResponseStream* r, uint8_t group, const std::vector<PresetInfo>& list, int activeId);
+void faderScript(AsyncResponseStream* r);
+
+// Groups that occur in a group-per-channel list, in grandMA2 order.
+std::vector<uint8_t> groupsPresent(const std::vector<uint8_t>& channelGroups);

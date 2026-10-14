@@ -82,6 +82,12 @@ void displayUpdate(const DisplayStatus& s) {
   if (s.timeValid) {
     oled.drawString(0, 53, "Up " + formatUptime(s.uptimeMs));
   }
+  if (s.linkPeers >= 0) {
+    oled.setTextAlignment(TEXT_ALIGN_RIGHT);
+    // count includes this box
+    oled.drawString(128, 53, s.linkPeers == 0 ? String("LoRa: allein") : "LoRa: " + String(s.linkPeers + 1) + " Boxen");
+    oled.setTextAlignment(TEXT_ALIGN_LEFT);
+  }
 
   oled.display();
 }
