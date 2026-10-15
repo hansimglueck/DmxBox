@@ -3,6 +3,8 @@
 #include "lora_link.h"
 #include "fixtures.h"
 #include "presets.h"
+#include "system.h"
+#include <esp_rom_crc.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <mbedtls/md.h>
@@ -11,8 +13,8 @@
 extern uint8_t data[];
 
 static const char* LINK_FILE = "/link.json";
-static const uint8_t PROTO_VER = 3;
-static const uint32_t BEACON_INTERVAL_MS = 30000;
+static const uint8_t PROTO_VER = 4;
+static const uint32_t BEACON_INTERVAL_MS = 10000;
 static const uint32_t VALUES_CHECK_MS = 200;
 static const uint32_t VALUES_REFRESH_MS = 60000;
 static const uint32_t SET_RETRY_MS = 1500;
@@ -39,7 +41,14 @@ enum : uint8_t {
   PT_REFS = 9,
   PT_CMD = 10,
   PT_ACK = 11,
+  PT_DEF_PUSH = 12,
+  PT_DEF_ACK = 13,
 };
+// command ops beyond the preset ops (PresetOp, 1..5)
+enum : uint8_t { CMD_FIXTURE_SAVE = 10, CMD_FIXTURE_DELETE, CMD_SNAPSHOT_SAVE, CMD_SNAPSHOT_RESET };
+static const uint32_t DEF_PUSH_RETRY_MS = 5000;
+static const uint8_t DEF_PUSH_MAX_ATTEMPTS = 3;
+static const uint32_t SNAPSHOT_SHOW_MS = 60000;
 static const size_t PRESETS_PER_FIXTURE_MAX = 60;
 static const uint32_t CMD_RETRY_MS = 1500;
 static const uint8_t CMD_MAX_ATTEMPTS = 3;
@@ -86,8 +95,36 @@ struct PendingCmd {
   uint8_t group;
   uint16_t presetId;
   String name;
-  uint8_t attempts;
-  uint32_t lastSendMs;
+  uint16_t address = 0, defId = 0, count = 0;  // fixture ops
+  uint8_t attempts = 0;
+  uint32_t lastSendMs = 0;
+};
+
+// Sending a definition to another box, followed by saving a fixture that uses it.
+struct DefPush {
+  uint16_t box, xfer;
+  std::vector<uint8_t> json;
+  uint32_t sendMask = 0;
+  uint8_t attempts = 0;
+  uint32_t lastSendMs = 0;
+  PendingCmd then;  // CMD_FIXTURE_SAVE; defId filled in from the ACK
+};
+
+// Receiving side of a definition transfer.
+struct DefAssembly {
+  uint16_t src, xfer, total;
+  uint32_t mask = 0;
+  std::vector<uint8_t> buf;
+  bool done = false;
+  uint16_t defId = 0;
+  String err;
+  uint32_t lastMs = 0;
+};
+
+struct SnapshotRun {
+  bool reset = false;
+  uint32_t startedMs = 0;
+  std::vector<std::pair<uint16_t, int8_t>> boxes;  // box, 0 pending / 1 ok / -1 failed
 };
 
 static Link* transport = &loraLink;
@@ -102,6 +139,9 @@ static uint16_t nextNonce = 1;
 // recently executed commands (sender, nonce) so that retries are not executed twice
 static std::vector<std::pair<uint16_t, uint16_t>> doneCmds;
 static uint32_t lastRefsVersion = 0xFFFFFFFF;
+static std::vector<DefPush> defPushes;
+static std::vector<DefAssembly> defAssemblies;
+static SnapshotRun snapshotRun;
 static bool refsSendPending = false;
 static std::vector<std::vector<uint8_t>> txQueue;
 static SemaphoreHandle_t mtx = nullptr;
@@ -166,16 +206,16 @@ static void loadSettings(const char* defaultName) {
 String syncSaveSettings(const LinkSettings& s) {
   LinkSettings n = s;
   n.name.trim();
-  if (n.name.isEmpty() || n.name.length() > 32) return "Name muss 1–32 Zeichen lang sein";
-  if (n.password.length() < 4) return "Passwort muss mindestens 4 Zeichen haben";
-  if (n.txPower < 0 || n.txPower > 27) return "Sendeleistung muss zwischen 0 und 27 dBm liegen";
+  if (n.name.isEmpty() || n.name.length() > 32) return "Name must be 1–32 characters";
+  if (n.password.length() < 4) return "Password needs at least 4 characters";
+  if (n.txPower < 0 || n.txPower > 27) return "Transmit power must be between 0 and 27 dBm";
   JsonDocument doc;
   doc["name"] = n.name;
   doc["password"] = n.password;
   doc["enabled"] = n.enabled;
   doc["txPower"] = n.txPower;
   File f = LittleFS.open(LINK_FILE, "w");
-  if (!f || serializeJson(doc, f) == 0) return "Speichern fehlgeschlagen";
+  if (!f || serializeJson(doc, f) == 0) return "Saving failed";
   f.close();
   {
     Lock l;
@@ -263,7 +303,118 @@ void syncPing() { pingRequested = true; }
 void syncPresetCommand(uint16_t box, uint8_t op, uint16_t fixtureId, uint8_t group, uint16_t presetId,
                        const String& name) {
   Lock l;
-  pendingCmds.push_back({box, nextNonce++, op, fixtureId, group, presetId, name, 0, 0});
+  PendingCmd c;
+  c.box = box;
+  c.nonce = nextNonce++;
+  c.op = op;
+  c.fixtureId = fixtureId;
+  c.group = group;
+  c.presetId = presetId;
+  c.name = name;
+  pendingCmds.push_back(c);
+}
+
+void syncRemoteFixtureSave(uint16_t box, uint16_t fixtureId, const String& name, uint16_t address,
+                           uint16_t remoteDefId, int pushLocalDef, uint16_t count) {
+  PendingCmd c;
+  c.box = box;
+  c.op = CMD_FIXTURE_SAVE;
+  c.fixtureId = fixtureId;
+  c.name = name;
+  c.address = address;
+  c.defId = remoteDefId;
+  c.count = count;
+  std::vector<uint8_t> json;
+  if (pushLocalDef >= 0) {
+    fixturesLock();
+    FixtureDef* d = findDef(pushLocalDef);
+    if (d) {
+      JsonDocument doc;
+      defToJson(*d, doc.to<JsonObject>());
+      String s;
+      serializeJson(doc, s);
+      json.assign(s.c_str(), s.c_str() + s.length());
+    }
+    fixturesUnlock();
+  }
+  Lock l;
+  c.nonce = nextNonce++;
+  if (json.empty()) {
+    pendingCmds.push_back(c);
+    return;
+  }
+  DefPush dp;
+  dp.box = box;
+  dp.xfer = nextNonce++;
+  dp.json = json;
+  dp.then = c;
+  defPushes.push_back(dp);
+}
+
+void syncRemoteFixtureDelete(uint16_t box, uint16_t fixtureId) {
+  Lock l;
+  PendingCmd c;
+  c.box = box;
+  c.nonce = nextNonce++;
+  c.op = CMD_FIXTURE_DELETE;
+  c.fixtureId = fixtureId;
+  pendingCmds.push_back(c);
+}
+
+int syncPendingFor(uint16_t box) {
+  Lock l;
+  int n = 0;
+  for (const PendingCmd& c : pendingCmds) if (!box || c.box == box) n++;
+  for (const DefPush& d : defPushes) if (!box || d.box == box) n++;
+  return n;
+}
+
+void syncSnapshotAll(bool reset) {
+  if (reset) snapshotReset();
+  else snapshotSave();
+  Lock l;
+  snapshotRun = SnapshotRun();
+  snapshotRun.reset = reset;
+  snapshotRun.startedMs = millis();
+  for (const BoxState& b : boxes) {
+    if (!b.box.peer.online()) continue;
+    PendingCmd c;
+    c.box = b.box.peer.id;
+    c.nonce = nextNonce++;
+    c.op = reset ? CMD_SNAPSHOT_RESET : CMD_SNAPSHOT_SAVE;
+    c.fixtureId = 0;
+    c.group = 0;
+    c.presetId = 0;
+    pendingCmds.push_back(c);
+    snapshotRun.boxes.push_back({c.box, 0});
+  }
+}
+
+SnapshotStatus syncSnapshotStatus() {
+  Lock l;
+  SnapshotStatus st;
+  if (!snapshotRun.startedMs || millis() - snapshotRun.startedMs > SNAPSHOT_SHOW_MS) return st;
+  st.active = true;
+  st.reset = snapshotRun.reset;
+  st.total = 1 + snapshotRun.boxes.size();
+  st.ok = 1;
+  for (const auto& e : snapshotRun.boxes) {
+    if (e.second > 0) st.ok++;
+    else if (e.second == 0) st.pending++;
+    else {
+      BoxState* b = nullptr;
+      for (BoxState& x : boxes) if (x.box.peer.id == e.first) b = &x;
+      st.failed.push_back(b ? b->box.peer.name : String(e.first, HEX));
+    }
+  }
+  return st;
+}
+
+// Caller holds the lock.
+static void snapshotResult(uint16_t box, bool ok) {
+  for (auto& e : snapshotRun.boxes) {
+    if (e.first == box && e.second == 0) e.second = ok ? 1 : -1;
+  }
 }
 
 // ---------- packet helpers ----------
@@ -347,6 +498,7 @@ static void rebuildOwn() {
     uint16_t n = fixtureChannelCount(f);
     std::vector<uint8_t> entry;
     put<uint16_t>(entry, f.id);
+    put<uint16_t>(entry, f.defId);
     put<uint16_t>(entry, f.address);
     put<uint16_t>(entry, n);
     putStr(entry, f.name, FIXTURE_NAME_MAX);
@@ -376,8 +528,20 @@ static void rebuildOwn() {
     count++;
     for (uint16_t a = f.address; a < f.address + n && a <= 512; a++) used[a] = true;
   }
-  fixturesUnlock();
   blob[0] = count;
+  std::vector<uint8_t> defs;
+  uint8_t defCount = 0;
+  for (const FixtureDef& d : fixtureDefs) {
+    if (defCount == 255 || blob.size() + defs.size() + 40 > CHUNK * MAX_CHUNKS) break;
+    put<uint16_t>(defs, d.id);
+    put<uint32_t>(defs, defCrc(d));
+    put<uint16_t>(defs, d.channels.size());
+    putStr(defs, d.name, FIXTURE_NAME_MAX);
+    defCount++;
+  }
+  fixturesUnlock();
+  put<uint8_t>(blob, defCount);
+  blob.insert(blob.end(), defs.begin(), defs.end());
   descBlob = blob;
   descSendMask = 0;
   ownBuilt = true;
@@ -443,7 +607,7 @@ static bool anyPeerOnline() {
 
 // ---------- receiving ----------
 
-static bool parseDesc(const std::vector<uint8_t>& blob, std::vector<RemoteFixture>& out) {
+static bool parseDesc(const std::vector<uint8_t>& blob, std::vector<RemoteFixture>& out, std::vector<RemoteDef>& defsOut) {
   const uint8_t* p = blob.data();
   const uint8_t* end = p + blob.size();
   uint8_t count;
@@ -451,7 +615,8 @@ static bool parseDesc(const std::vector<uint8_t>& blob, std::vector<RemoteFixtur
   out.clear();
   for (uint8_t i = 0; i < count; i++) {
     RemoteFixture f;
-    if (!get(p, end, f.id) || !get(p, end, f.address) || !get(p, end, f.count) || !getStr(p, end, f.name)) return false;
+    if (!get(p, end, f.id) || !get(p, end, f.defId) || !get(p, end, f.address) || !get(p, end, f.count) ||
+        !getStr(p, end, f.name)) return false;
     for (uint16_t c = 0; c < f.count; c++) {
       String n;
       int16_t fine;
@@ -471,6 +636,14 @@ static bool parseDesc(const std::vector<uint8_t>& blob, std::vector<RemoteFixtur
       if (rp.group < GROUP_COUNT) f.presets.push_back(rp);
     }
     out.push_back(f);
+  }
+  uint8_t nd;
+  if (!get(p, end, nd)) return false;
+  defsOut.clear();
+  for (uint8_t i = 0; i < nd; i++) {
+    RemoteDef d;
+    if (!get(p, end, d.id) || !get(p, end, d.crc) || !get(p, end, d.channels) || !getStr(p, end, d.name)) return false;
+    defsOut.push_back(d);
   }
   return true;
 }
@@ -514,10 +687,13 @@ static void handleDescChunk(BoxState& b, uint16_t src, uint16_t version, uint16_
   if ((a.mask & full) != full) return;
 
   std::vector<RemoteFixture> fx;
-  if (parseDesc(a.buf, fx)) {
+  std::vector<RemoteDef> defs;
+  if (parseDesc(a.buf, fx, defs)) {
     b.box.fixtures = fx;
+    b.box.defs = defs;
     b.box.described = true;
     b.describedVersion = version;
+    b.box.version = version;
     Serial.printf("Link: %04x fixture list v%u: %u fixtures\n", src, version, (unsigned)fx.size());
     std::vector<uint8_t> r;
     put<uint16_t>(r, src);
@@ -665,8 +841,10 @@ static void handlePacket(const uint8_t* buf, size_t len, float rssi, float snr) 
       uint16_t target, nonce, fixtureId, presetId;
       uint8_t op, group;
       String name;
+      uint16_t address, defId, count;
       if (!get(p, end, target) || target != boxId || !get(p, end, nonce) || !get(p, end, op) ||
-          !get(p, end, fixtureId) || !get(p, end, group) || !get(p, end, presetId) || !getStr(p, end, name)) return;
+          !get(p, end, fixtureId) || !get(p, end, group) || !get(p, end, presetId) || !getStr(p, end, name) ||
+          !get(p, end, address) || !get(p, end, defId) || !get(p, end, count)) return;
       String err;
       uint16_t src = h.src;
       bool dup = std::find(doneCmds.begin(), doneCmds.end(), std::make_pair(src, nonce)) != doneCmds.end();
@@ -677,18 +855,57 @@ static void handlePacket(const uint8_t* buf, size_t len, float rssi, float snr) 
           case PRESET_CREATE: err = presetCreate(fixtureId, group, name); break;
           case PRESET_RENAME: err = presetRename(presetId, name); break;
           case PRESET_DELETE: err = presetDelete(presetId); break;
-          default: err = "Unbekannte Aktion";
+          case CMD_FIXTURE_SAVE: {
+            Fixture f;
+            if (fixtureId) {
+              Fixture* existing = findFixture(fixtureId);
+              if (!existing) {
+                err = "Fixture not found";
+                break;
+              }
+              f = *existing;
+            }
+            f.name = name;
+            f.address = address;
+            f.defId = defId;
+            f.channelCount = count;
+            err = saveFixture(f);
+            break;
+          }
+          case CMD_FIXTURE_DELETE:
+            err = deleteFixture(fixtureId);
+            if (err.isEmpty()) presetsFixtureDeleted(fixtureId);
+            break;
+          case CMD_SNAPSHOT_SAVE: snapshotSave(); break;
+          case CMD_SNAPSHOT_RESET: snapshotReset(); break;
+          default: err = "Unknown action";
         }
         doneCmds.push_back({src, nonce});
         if (doneCmds.size() > 32) doneCmds.erase(doneCmds.begin());
-        Serial.printf("Link: preset command %u from %04x: %s\n", op, h.src, err.isEmpty() ? "ok" : err.c_str());
-        valuesCheckNow = true;
+        Serial.printf("Link: command %u from %04x: %s\n", op, h.src, err.isEmpty() ? "ok" : err.c_str());
+        // changed values go out before the ACK, so the sender has them when it sees the confirmation
+        sendValues(false);
       }
       std::vector<uint8_t> r;
       put<uint16_t>(r, h.src);
       put<uint16_t>(r, nonce);
       put<uint8_t>(r, err.isEmpty() ? 1 : 0);
       putStr(r, err, 120);
+      // list version after the command: the sender fetches the new list right away instead of
+      // relying on the (single, losable) beacon
+      put<uint16_t>(r, fixturesVersion());
+      // preset ops: the fixture's current references ride along, so the sender's page can show
+      // the active preset together with the confirmation instead of waiting for the next PT_REFS
+      if (op >= PRESET_RECALL && op <= PRESET_DELETE) {
+        std::vector<PresetRef> fr;
+        for (const PresetRef& pr : presetRefs()) if (pr.fixtureId == fixtureId) fr.push_back(pr);
+        put<uint16_t>(r, fixtureId);
+        put<uint8_t>(r, (uint8_t)min(fr.size(), (size_t)GROUP_COUNT));
+        for (size_t i = 0; i < fr.size() && i < GROUP_COUNT; i++) {
+          put<uint8_t>(r, fr[i].group);
+          put<uint16_t>(r, fr[i].presetId);
+        }
+      }
       queuePacket(PT_ACK, r);
       break;
     }
@@ -697,10 +914,106 @@ static void handlePacket(const uint8_t* buf, size_t len, float rssi, float snr) 
       uint8_t ok;
       String msg;
       if (!get(p, end, target) || target != boxId || !get(p, end, nonce) || !get(p, end, ok) || !getStr(p, end, msg)) return;
+      for (const PendingCmd& c : pendingCmds) {
+        if (c.box == h.src && c.nonce == nonce && (c.op == CMD_SNAPSHOT_SAVE || c.op == CMD_SNAPSHOT_RESET)) {
+          snapshotResult(c.box, ok);
+        }
+      }
       pendingCmds.erase(std::remove_if(pendingCmds.begin(), pendingCmds.end(),
                                        [&](const PendingCmd& c) { return c.box == h.src && c.nonce == nonce; }),
                         pendingCmds.end());
       b.box.lastError = ok ? String("") : msg;
+      b.box.lastErrorMs = millis();
+      uint16_t listVersion;
+      if (get(p, end, listVersion)) {
+        bool outdated = !b.box.described || listVersion != b.describedVersion;
+        bool alreadyLoading = b.box.loading && b.asmb.version == listVersion;
+        if (outdated && !alreadyLoading) startDescFetch(b, listVersion);
+      }
+      uint16_t refFixture;
+      uint8_t nrefs;
+      if (get(p, end, refFixture) && get(p, end, nrefs)) {
+        std::vector<RemoteRef> fresh;
+        for (uint8_t i = 0; i < nrefs; i++) {
+          RemoteRef rr;
+          rr.fixtureId = refFixture;
+          if (!get(p, end, rr.group) || !get(p, end, rr.presetId)) break;
+          fresh.push_back(rr);
+        }
+        auto& refs = b.box.refs;
+        refs.erase(std::remove_if(refs.begin(), refs.end(), [&](const RemoteRef& x) { return x.fixtureId == refFixture; }),
+                   refs.end());
+        refs.insert(refs.end(), fresh.begin(), fresh.end());
+      }
+      break;
+    }
+    case PT_DEF_PUSH: {
+      uint16_t target, xfer, total;
+      uint8_t index;
+      if (!get(p, end, target) || target != boxId || !get(p, end, xfer) || !get(p, end, total) || !get(p, end, index)) return;
+      uint16_t src = h.src;
+      DefAssembly* a = nullptr;
+      for (DefAssembly& x : defAssemblies) if (x.src == src && x.xfer == xfer) a = &x;
+      if (!a) {
+        if (defAssemblies.size() >= 4) defAssemblies.erase(defAssemblies.begin());
+        DefAssembly n;
+        n.src = src;
+        n.xfer = xfer;
+        n.total = total;
+        n.buf.assign(total, 0);
+        defAssemblies.push_back(n);
+        a = &defAssemblies.back();
+      }
+      a->lastMs = millis();
+      if (!a->done) {
+        size_t start = (size_t)index * CHUNK, dlen = end - p;
+        if (index >= MAX_CHUNKS || start + dlen > a->total) return;
+        if (dlen) memcpy(a->buf.data() + start, p, dlen);
+        a->mask |= 1UL << index;
+        if ((a->mask & chunkMask(a->total)) != chunkMask(a->total)) return;
+        // complete: reuse an identical definition, otherwise import it
+        uint32_t crc = esp_rom_crc32_le(0, a->buf.data(), a->buf.size());
+        fixturesLock();
+        FixtureDef* same = findDefByCrc(crc);
+        if (same) {
+          a->defId = same->id;
+        } else {
+          JsonDocument doc;
+          if (deserializeJson(doc, (const char*)a->buf.data(), a->buf.size())) a->err = "Definition unreadable";
+          else a->defId = importSingleDef(doc.as<JsonVariantConst>(), a->err);
+        }
+        fixturesUnlock();
+        a->done = true;
+        Serial.printf("Link: definition from %04x -> id %u %s\n", src, a->defId, a->err.c_str());
+      }
+      std::vector<uint8_t> r;
+      put<uint16_t>(r, src);
+      put<uint16_t>(r, xfer);
+      put<uint8_t>(r, a->defId ? 1 : 0);
+      put<uint16_t>(r, a->defId);
+      putStr(r, a->err, 120);
+      queuePacket(PT_DEF_ACK, r);
+      break;
+    }
+    case PT_DEF_ACK: {
+      uint16_t target, xfer, defId;
+      uint8_t ok;
+      String msg;
+      if (!get(p, end, target) || target != boxId || !get(p, end, xfer) || !get(p, end, ok) || !get(p, end, defId) ||
+          !getStr(p, end, msg)) return;
+      for (size_t i = 0; i < defPushes.size(); i++) {
+        if (defPushes[i].box != h.src || defPushes[i].xfer != xfer) continue;
+        if (ok) {
+          PendingCmd c = defPushes[i].then;
+          c.defId = defId;
+          pendingCmds.push_back(c);
+        } else {
+          b.box.lastError = msg;
+          b.box.lastErrorMs = millis();
+        }
+        defPushes.erase(defPushes.begin() + i);
+        break;
+      }
       break;
     }
   }
@@ -755,7 +1068,11 @@ static void processPendingCmds(uint32_t now) {
     if (c.attempts > 0 && now - c.lastSendMs < CMD_RETRY_MS) continue;
     BoxState* b = findBox(c.box);
     if (c.attempts >= CMD_MAX_ATTEMPTS || !b || !b->box.peer.online()) {
-      if (b) b->box.lastError = "Box hat nicht geantwortet";
+      if (b) {
+        b->box.lastError = "no answer";
+        b->box.lastErrorMs = now;
+      }
+      if (c.op == CMD_SNAPSHOT_SAVE || c.op == CMD_SNAPSHOT_RESET) snapshotResult(c.box, false);
       c.attempts = 0xFF;
       continue;
     }
@@ -767,6 +1084,9 @@ static void processPendingCmds(uint32_t now) {
     put<uint8_t>(pkt, c.group);
     put<uint16_t>(pkt, c.presetId);
     putStr(pkt, c.name, FIXTURE_NAME_MAX);
+    put<uint16_t>(pkt, c.address);
+    put<uint16_t>(pkt, c.defId);
+    put<uint16_t>(pkt, c.count);
     queuePacket(PT_CMD, pkt);
     c.attempts++;
     c.lastSendMs = now;
@@ -846,13 +1166,19 @@ void syncLoop() {
     txHoldUntilMs = now + random(RX_HOLDOFF_MIN_MS, RX_HOLDOFF_MAX_MS);
   }
 
+  static uint32_t beaconRepeatAt = 0;
   if (!ownBuilt || fixturesVersion() != ownVersion) {
     rebuildOwn();
+    beaconRequested = true;
+    beaconRepeatAt = now + 2000;  // a second beacon in case the first one got lost
+  }
+  if (beaconRepeatAt && (int32_t)(now - beaconRepeatAt) >= 0) {
+    beaconRepeatAt = 0;
     beaconRequested = true;
   }
   if (beaconRequested || (int32_t)(now - nextBeaconMs) >= 0) {
     beaconRequested = false;
-    nextBeaconMs = now + BEACON_INTERVAL_MS + random(0, 5000);
+    nextBeaconMs = now + BEACON_INTERVAL_MS + random(0, 2000);
     buildBeacon();
   }
   if (pingRequested) {
@@ -877,8 +1203,16 @@ void syncLoop() {
       if (all) refsSendPending = true;
     }
   }
+  // references go out twice: a single packet can collide with the fixture list transfer that
+  // usually follows a preset change
+  static uint32_t refsRepeatAt = 0;
   if (presetRefsVersion() != lastRefsVersion) {
     lastRefsVersion = presetRefsVersion();
+    refsSendPending = true;
+    refsRepeatAt = now + 2500;
+  }
+  if (refsRepeatAt && (int32_t)(now - refsRepeatAt) >= 0) {
+    refsRepeatAt = 0;
     refsSendPending = true;
   }
   if (refsSendPending && anyPeerOnline()) {
@@ -889,6 +1223,41 @@ void syncLoop() {
 
   processPendingSets(now);
   processDescRetries(now);
+
+  // definition transfers: (re)start, give up after a few attempts
+  for (size_t i = 0; i < defPushes.size(); i++) {
+    DefPush& dp = defPushes[i];
+    if (dp.sendMask || (dp.attempts && now - dp.lastSendMs < DEF_PUSH_RETRY_MS)) continue;
+    BoxState* b = findBox(dp.box);
+    if (dp.attempts >= DEF_PUSH_MAX_ATTEMPTS || !b || !b->box.peer.online()) {
+      if (b) {
+        b->box.lastError = "definition transfer failed";
+        b->box.lastErrorMs = now;
+      }
+      defPushes.erase(defPushes.begin() + i);
+      break;
+    }
+    dp.attempts++;
+    dp.sendMask = chunkMask(dp.json.size());
+  }
+  if (txQueue.empty()) {
+    for (DefPush& dp : defPushes) {
+      if (!dp.sendMask) continue;
+      size_t i = 0;
+      while (!(dp.sendMask & (1UL << i))) i++;
+      dp.sendMask &= ~(1UL << i);
+      std::vector<uint8_t> pkt;
+      put<uint16_t>(pkt, dp.box);
+      put<uint16_t>(pkt, dp.xfer);
+      put<uint16_t>(pkt, (uint16_t)dp.json.size());
+      put<uint8_t>(pkt, (uint8_t)i);
+      size_t start = i * CHUNK, stop = min(dp.json.size(), start + CHUNK);
+      pkt.insert(pkt.end(), dp.json.begin() + start, dp.json.begin() + stop);
+      queuePacket(PT_DEF_PUSH, pkt);
+      if (!dp.sendMask) dp.lastSendMs = now;
+      break;
+    }
+  }
 
   // fixture list chunks only go out when nothing else is waiting
   if (descSendMask && txQueue.empty()) {

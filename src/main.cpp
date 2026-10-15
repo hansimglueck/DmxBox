@@ -11,6 +11,7 @@
 #include "display.h"
 #include "fixtures.h"
 #include "presets.h"
+#include "system.h"
 #include "fixture_web.h"
 #ifdef HAS_LORA
 #include "sync.h"
@@ -319,8 +320,6 @@ uint8_t dmxWeekdayEndHour[7] = {0, 0, 0, 0, 0, 0, 0};
 uint8_t dmxWeekdayEndMinute[7] = {0, 0, 0, 0, 0, 0, 0};
 bool timeControlEnabled = false;
 
-// Weekday names for display
-const char* weekdayNames[7] = {"Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"};
 
 String getFormattedTime() {
   struct tm timeinfo;
@@ -497,6 +496,20 @@ void saveEEPROM() {
   Serial.println("All 512 DMX channels saved to EEPROM"); 
 }
 
+volatile bool restartRequested = false;
+void resetEEPROM();
+
+void snapshotSave() {
+  saveEEPROM();
+  presetsSnapshotSave();
+}
+
+void snapshotReset() {
+  presetsClearRefs();
+  resetEEPROM();
+  presetsSnapshotSave();
+}
+
 void resetEEPROM() {
   Serial.println("Resetting EEPROM - Setting all DMX channels to 0...");
   
@@ -628,7 +641,7 @@ void setup(){
   delay(1000);
   Serial.println("\n\n=== DMX Box Starting ===");
   displayInit();
-  displayMessage("Starte...");
+  displayMessage("Starting...");
 
 #ifdef HOSTNAME_MAC_SUFFIX
   // several boxes share one firmware: make hostname / AP SSID unique per board
@@ -637,11 +650,12 @@ void setup(){
   snprintf(uniqueName, sizeof(uniqueName), "%s-%02x%02x", WIFI_SSID,
            (unsigned)((mac >> 32) & 0xFF), (unsigned)((mac >> 40) & 0xFF));
   ssid = uniqueName;
-  Serial.printf("Box name: %s\n", ssid);
 #endif
 
   // Mount before the watchdog starts: the first-time format can take several seconds
   fixturesBegin();
+  applyStoredNetworkName();
+  Serial.printf("Network name: %s\n", ssid);
 
   // Configure watchdog timer (10 seconds timeout)
   esp_task_wdt_init(10, true);
@@ -667,8 +681,9 @@ void setup(){
   bool wifiConnected = false;
   if (strlen(savedSSID) > 0) {
     Serial.printf("Connecting to: %s\n", savedSSID);
-    displayMessage("Verbinde mit WLAN:", savedSSID);
+    displayMessage("Connecting to WiFi:", savedSSID);
     WiFi.mode(WIFI_STA);
+    WiFi.setHostname(ssid);
     wifiConnected = connectToWiFi(savedSSID, savedPassword);
   }
 
@@ -740,415 +755,7 @@ void setup(){
   registerSyncRoutes(server);
 #endif
 
-  server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request){
-    AsyncResponseStream *response = request->beginResponseStream("application/json");
-    
-    String html = "";
-
-    if (!apModeActive && WiFi.status() == WL_CONNECTED) {
-      html += "📡 <strong style='color: #4CAF50;'>WiFi: STA</strong><br>";
-      html += "Network: " + WiFi.SSID() + "<br>";
-      html += "IP: <strong>" + WiFi.localIP().toString() + "</strong><br>";
-      html += "Signal: " + String(WiFi.RSSI()) + " dBm<br>";
-
-      if (timeInitialized) {
-        html += "<br>🕐 <strong>Time:</strong> " + getFormattedTime();
-
-        if (timeControlEnabled) {
-          bool isActive = isDMXActiveTime();
-          html += "<br>📡 <strong>DMX:</strong> <span style='color: ";
-          html += isActive ? "#4CAF50" : "#f44336";
-          html += ";'>";
-          html += isActive ? "ACTIVE" : "INACTIVE";
-          html += "</span>";
-          
-          // Show current weekday and today's schedule
-          struct tm timeinfo;
-          if (getLocalTime(&timeinfo)) {
-            int weekdayIndex = (timeinfo.tm_wday + 6) % 7;
-            char scheduleStr[64];
-            sprintf(scheduleStr, "<br>📅 %s: %02d:%02d - %02d:%02d",
-                    weekdayNames[weekdayIndex],
-                    dmxWeekdayStartHour[weekdayIndex], dmxWeekdayStartMinute[weekdayIndex],
-                    dmxWeekdayEndHour[weekdayIndex], dmxWeekdayEndMinute[weekdayIndex]);
-            html += scheduleStr;
-          }
-        } else {
-          html += "<br>📡 <strong>DMX:</strong> <span style='color: #4CAF50;'>ALWAYS ACTIVE</span>";
-        }
-      }
-    } else {
-      html += "📶 <strong style='color: #2196F3;'>WiFi: AP</strong><br>";
-      html += "Network: " + String(ssid) + "<br>";
-      html += "IP: <strong>" + WiFi.softAPIP().toString() + "</strong><br>";
-    }
-
-    html += "<br>Hostname: <strong>" + String(ssid) + ".local</strong>";
-#ifdef HAS_LORA
-    {
-      LinkSettings ls = syncSettings();
-      html += "<br><br>📡 <strong>LoRa:</strong> ";
-      if (!ls.enabled) {
-        html += "<span style='color: #f44336;'>aus</span>";
-      } else {
-        String online;
-        int count = 0;
-        for (const PeerInfo& p : syncPeers()) {
-          if (!p.online()) continue;
-          online += (count ? ", " : "") + p.name + " (" + String((int)p.rssi) + " dBm)";
-          count++;
-        }
-        if (count == 0) {
-          html += "<span style='color: #ff9800;'>allein</span>";
-        } else {
-          html += "<span style='color: #4CAF50;'>" + String(count + 1) + " Boxen</span><br>Verbunden mit: " + online;
-        }
-      }
-      html += " · <a href='/link'>Verbund</a>";
-    }
-#endif
-    
-    // JSON response with HTML content
-    response->print("{\"html\":\"");
-    // Escape quotes in HTML
-    html.replace("\"", "\\\"");
-    response->print(html);
-    response->print("\"}");
-    
-    request->send(response);
-  });
-  
-  server.on("/saveall", HTTP_GET, [](AsyncWebServerRequest *request){
-    saveEEPROM();
-    request->redirect("/");
-  });
-  
-  server.on("/resetconfirm", HTTP_GET, [](AsyncWebServerRequest *request){
-    AsyncResponseStream *response = request->beginResponseStream("text/html");
-    response->print("<!DOCTYPE html><html>");
-    response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-    response->print("<link rel=\"icon\" href=\"data:,\">");
-    response->print("<base target='_self'>");  // Add this line
-    response->print("<style>");
-    response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
-    response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
-    response->print("h1 { color: #f44336; }");
-    response->print(".button { background-color: #4CAF50; border: none; color: white; padding: 15px 30px;");
-    response->print("text-decoration: none; font-size: 24px; margin: 20px; cursor: pointer; display: inline-block; border-radius: 4px;}");
-    response->print(".button:hover { background-color: #45a049; }");
-    response->print(".button-danger { background-color: #f44336; }");
-    response->print(".button-danger:hover { background-color: #da190b; }");
-    response->print("p { color: #e0e0e0; }");
-    response->print("</style></head>");
-    response->print("<body><h1>⚠️ Confirm Reset</h1>");
-    response->print("<p style='font-size: 24px; margin: 40px;'>Reset ALL DMX channels to 0?<br>This cannot be undone!</p>");
-    response->print("<a href='/reseteeprom'><button class='button button-danger'>Yes, Reset Everything</button></a><br>");
-    response->print("<a href='/'><button class='button'>Cancel</button></a>");
-    response->print("</body></html>");
-    request->send(response);
-  });
-  
-  server.on("/reseteeprom", HTTP_GET, [](AsyncWebServerRequest *request){
-    resetEEPROM();
-    request->redirect("/");
-  });
-  
-  server.on("/wifisetup", HTTP_GET, [](AsyncWebServerRequest *request){
-    // Show scanning page with auto-redirect
-    AsyncResponseStream *response = request->beginResponseStream("text/html");
-    response->print("<!DOCTYPE html><html>");
-    response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-    response->print("<meta http-equiv='refresh' content='3;url=/wifiscan'>");
-    response->print("<link rel=\"icon\" href=\"data:,\">");
-    response->print("<base target='_self'>");
-    response->print("<style>");
-    response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
-    response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
-    response->print("h1 { color: #2196F3; }");
-    response->print(".spinner { border: 8px solid #333; border-top: 8px solid #2196F3; border-radius: 50%;");
-    response->print("width: 60px; height: 60px; animation: spin 1s linear infinite; margin: 40px auto; }");
-    response->print("@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }");
-    response->print("p { color: #aaa; }");
-    response->print("</style></head>");
-    response->print("<body><h1>📶 WiFi Setup</h1>");
-    response->print("<div class='spinner'></div>");
-    response->print("<h2>Scanning for networks...</h2>");
-    response->print("<p>Please wait, this may take a few seconds.</p>");
-    response->print("</body></html>");
-    request->send(response);
-  });
-  
-  server.on("/wifiscan", HTTP_GET, [](AsyncWebServerRequest *request){
-    // Feed the watchdog before long operation
-    esp_task_wdt_reset();
-    
-    AsyncResponseStream *response = request->beginResponseStream("text/html");
-    response->print("<!DOCTYPE html><html>");
-    response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-    response->print("<link rel=\"icon\" href=\"data:,\">");
-    response->print("<base target='_self'>");
-    response->print("<style>");
-    response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
-    response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
-    response->print("h1 { color: #2196F3; }");
-    response->print(".network { margin: 15px; padding: 15px; border: 1px solid #555; background-color: #2a2a2a; border-radius: 4px; }");
-    response->print(".network:hover { background-color: #333; border-color: #2196F3; }");
-    response->print(".network a { display: block; color: #e0e0e0; text-decoration: none; }");
-    response->print(".button { background-color: #4CAF50; border: none; color: white; padding: 15px 30px;");
-    response->print("text-decoration: none; font-size: 20px; margin: 20px; cursor: pointer; border-radius: 4px; display: inline-block;}");
-    response->print("input { font-size: 18px; padding: 10px; width: 250px; background-color: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; margin: 10px; }");
-    response->print("a { color: #4CAF50; text-decoration: none; }");
-    response->print(".signal { float: right; color: #4CAF50; }");
-    response->print("</style></head>");
-    response->print("<body><h1>📶 WiFi Networks</h1>");
-    response->print("<p><a href='/'>← Back to Fixtures</a></p>");
-    
-    // Scan for networks with watchdog reset
-    response->print("<div style='margin: 30px;'>");
-    response->print("<h2>Available Networks:</h2>");
-    
-    Serial.println("Starting WiFi scan...");
-    
-    // Async scan with timeout
-    int n = WiFi.scanNetworks(false, false, false, 300);  // 300ms per channel max
-    Serial.printf("Scan complete, found %d networks\n", n);
-    
-    if (n == 0) {
-      response->print("<p>No networks found.</p>");
-      response->print("<p><a href='/wifisetup'><button class='button'>Scan Again</button></a></p>");
-    } else {
-      for (int i = 0; i < n && i < 20; i++) {  // Limit to 20 networks
-        
-        String ssid = WiFi.SSID(i);
-        int rssi = WiFi.RSSI(i);
-        String signalStrength = (rssi > -50) ? "████" : (rssi > -60) ? "███░" : (rssi > -70) ? "██░░" : "█░░░";
-        bool isOpen = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
-        
-        response->printf("<div class='network'>");
-        response->printf("<a href='/wifiselect?ssid=%s&open=%d'>", ssid.c_str(), isOpen ? 1 : 0);
-        response->printf("<span>%s</span>", ssid.c_str());
-        response->printf("<span class='signal'>%s %ddBm</span>", signalStrength.c_str(), rssi);
-        if (isOpen) response->print(" <span style='color: #ff9800;'>🔓</span>");
-        response->print("</a>");
-        response->print("</div>");
-      }
-    }
-    
-    response->print("</div>");
-    
-    // Manual entry form
-    response->print("<div style='margin: 30px;'>");
-    response->print("<h2>Manual Entry:</h2>");
-    response->print("<form action='/wifiselect' method='get'>");
-    response->print("<input type='text' name='ssid' placeholder='SSID' required><br>");
-    response->print("<input type='hidden' name='open' value='0'>");
-    response->print("<button class='button' type='submit'>Next</button>");
-    response->print("</form>");
-    response->print("</div>");
-    
-    response->print("</body></html>");
-    request->send(response);
-  });
-  
-  server.on("/wifiselect", HTTP_GET, [](AsyncWebServerRequest *request){
-    if (!request->hasParam("ssid")) {
-      request->redirect("/wifisetup");
-      return;
-    }
-    
-    String selectedSSID = request->getParam("ssid")->value();
-    bool isOpen = request->hasParam("open") && request->getParam("open")->value() == "1";
-    
-    AsyncResponseStream *response = request->beginResponseStream("text/html");
-    response->print("<!DOCTYPE html><html>");
-    response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-    response->print("<link rel=\"icon\" href=\"data:,\">");
-    response->print("<base target='_self'>");
-    response->print("<style>");
-    response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
-    response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
-    response->print("h1 { color: #2196F3; }");
-    response->print(".button { background-color: #4CAF50; border: none; color: white; padding: 15px 30px;");
-    response->print("text-decoration: none; font-size: 20px; margin: 20px; cursor: pointer; border-radius: 4px;}");
-    response->print("input { font-size: 18px; padding: 10px; width: 250px; background-color: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; margin: 10px; }");
-    response->print("a { color: #4CAF50; text-decoration: none; }");
-    response->print("</style></head>");
-    response->print("<body><h1>Enter Password</h1>");
-    response->print("<p><a href='/wifisetup'>← Back to Networks</a></p>");
-    
-    response->print("<div style='margin: 30px;'>");
-    response->printf("<h2>Network: %s</h2>", selectedSSID.c_str());
-    
-    if (isOpen) {
-      response->print("<p style='color: #ff9800;'>This is an open network (no password required)</p>");
-    }
-    
-    response->print("<form action='/wificonnect' method='get'>");
-    response->printf("<input type='hidden' name='ssid' value='%s'>", selectedSSID.c_str());
-    
-    if (isOpen) {
-      response->print("<input type='hidden' name='password' value=''>");
-      response->print("<button class='button' type='submit'>Connect Now</button>");
-    } else {
-      response->print("<input type='password' name='password' placeholder='Password' required autofocus><br>");
-      response->print("<button class='button' type='submit'>Connect</button>");
-    }
-    
-    response->print("</form>");
-    response->print("</div>");
-    
-    response->print("</body></html>");
-    request->send(response);
-  });
-  
-  server.on("/wificonnect", HTTP_GET, [](AsyncWebServerRequest *request){
-    if (request->hasParam("ssid")) {
-      String newSSID = request->getParam("ssid")->value();
-      String newPassword = request->hasParam("password") ? request->getParam("password")->value() : "";
-      
-      // Save to EEPROM
-      saveWiFiConfig(newSSID.c_str(), newPassword.c_str());
-      
-      // Send response
-      AsyncResponseStream *response = request->beginResponseStream("text/html");
-      response->print("<!DOCTYPE html><html>");
-      response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-      response->print("<link rel=\"icon\" href=\"data:,\">");
-      response->print("<base target='_self'>");
-      response->print("<style>");
-      response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
-      response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 20px;}");
-      response->print("h1 { color: #2196F3; }");
-      response->print("</style></head>");
-      response->print("<body><h1>✅ WiFi Configuration Saved</h1>");
-      response->printf("<p>SSID: %s</p>", newSSID.c_str());
-      response->print("<p>Device will restart in 3 seconds...</p>");
-      response->print("<p>If connection succeeds, the device will be available on your network.</p>");
-      response->print("<p>If connection fails, AP mode will start again.</p>");
-      response->print("</body></html>");
-      request->send(response);
-      
-      // Restart after 3 seconds
-      delay(3000);
-      ESP.restart();
-    } else {
-      request->redirect("/wifisetup");
-    }
-  });
-  
-  server.on("/timesetup", HTTP_GET, [](AsyncWebServerRequest *request){
-    AsyncResponseStream *response = request->beginResponseStream("text/html");
-    response->print("<!DOCTYPE html><html>");
-    response->print("<head><meta charset='UTF-8'><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-    response->print("<link rel=\"icon\" href=\"data:,\">");
-    response->print("<base target='_self'>");
-    response->print("<style>");
-    response->print("body { background-color: #1a1a1a; color: #e0e0e0; margin: 0; padding: 0; }");
-    response->print("html { font-family: Helvetica, Arial, sans-serif; display: inline-block; margin: 0px auto; text-align: center; font-size: 18px;}");
-    response->print("h1 { color: #2196F3; }");
-    response->print("h3 { color: #4CAF50; margin-top: 0; }");
-    response->print(".button { background-color: #4CAF50; border: none; color: white; padding: 15px 30px;");
-    response->print("text-decoration: none; font-size: 18px; margin: 10px; cursor: pointer; border-radius: 4px;}");
-    response->print(".day-section { border: 1px solid #555; padding: 15px; margin: 15px auto; border-radius: 5px; max-width: 600px; background-color: #2a2a2a; }");
-    response->print("input[type='number'] { font-size: 16px; padding: 8px; width: 60px; background-color: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; margin: 3px; }");
-    response->print("input[type='checkbox'] { width: 25px; height: 25px; margin: 10px; }");
-    response->print("label { display: inline-block; margin: 10px; }");
-    response->print("a { color: #4CAF50; text-decoration: none; }");
-    response->print("</style>");
-    response->print("<script>");
-    response->print("function setAllDays() {");
-    response->print("  var h0 = document.querySelector('[name=day0_start_h]').value;");
-    response->print("  var m0 = document.querySelector('[name=day0_start_m]').value;");
-    response->print("  var h1 = document.querySelector('[name=day0_end_h]').value;");
-    response->print("  var m1 = document.querySelector('[name=day0_end_m]').value;");
-    response->print("  for (var i = 1; i < 7; i++) {");
-    response->print("    document.querySelector('[name=day' + i + '_start_h]').value = h0;");
-    response->print("    document.querySelector('[name=day' + i + '_start_m]').value = m0;");
-    response->print("    document.querySelector('[name=day' + i + '_end_h]').value = h1;");
-    response->print("    document.querySelector('[name=day' + i + '_end_m]').value = m1;");
-    response->print("  }");
-    response->print("}");
-    response->print("</script></head>");
-    response->print("<body><h1>⏰ Wochentag Zeit-Steuerung</h1>");
-    response->print("<p><a href='/'>← Zurück</a></p>");
-    
-    response->print("<div style='margin: 20px;'>");
-    response->print("<label>");
-    response->print("<input type='checkbox' id='enabled_cb' name='enabled' value='1'");
-    if (timeControlEnabled) response->print(" checked");
-    response->print("> Zeit-Steuerung aktiviert");
-    response->print("</label>");
-    response->print("<br><button class='button' onclick='setAllDays()'>Alle Tage auf gleiche Zeit setzen</button>");
-    response->print("</div>");
-    
-    response->print("<form action='/timesave' method='get'>");
-    
-    for (int day = 0; day < 7; day++) {
-      response->print("<div class='day-section'>");
-      response->printf("<h3>%s</h3>", weekdayNames[day]);
-      response->print("<label>Start:");
-      response->printf("<input type='number' name='day%d_start_h' value='%d' min='0' max='23'>", day, dmxWeekdayStartHour[day]);
-      response->print(":");
-      response->printf("<input type='number' name='day%d_start_m' value='%d' min='0' max='59'>", day, dmxWeekdayStartMinute[day]);
-      response->print("</label>");
-      response->print("<label>Ende:");
-      response->printf("<input type='number' name='day%d_end_h' value='%d' min='0' max='23'>", day, dmxWeekdayEndHour[day]);
-      response->print(":");
-      response->printf("<input type='number' name='day%d_end_m' value='%d' min='0' max='59'>", day, dmxWeekdayEndMinute[day]);
-      response->print("</label>");
-      response->print("</div>");
-    }
-    
-    response->print("<input type='hidden' name='enabled' id='enabled_val' value='0'>");
-    response->print("<script>document.getElementById('enabled_cb').onchange = function() { document.getElementById('enabled_val').value = this.checked ? '1' : '0'; };</script>");
-    
-    response->print("<p style='color: #aaa;'>DMX wird nur während der eingestellten Zeiten aktiv sein.<br>");
-    response->print("Außerhalb dieser Zeiten werden alle DMX-Kanäle auf 0 gesetzt.</p>");
-    
-    response->print("<button class='button' type='submit'>Speichern</button>");
-    response->print("</form>");
-    
-    response->print("</body></html>");
-    request->send(response);
-  });
-  
-  server.on("/timesave", HTTP_GET, [](AsyncWebServerRequest *request){
-    // Parse all 7 weekdays
-    for (int day = 0; day < 7; day++) {
-      String prefix = "day" + String(day);
-      
-      if (request->hasParam(prefix + "_start_h")) {
-        dmxWeekdayStartHour[day] = request->getParam(prefix + "_start_h")->value().toInt();
-      }
-      if (request->hasParam(prefix + "_start_m")) {
-        dmxWeekdayStartMinute[day] = request->getParam(prefix + "_start_m")->value().toInt();
-      }
-      if (request->hasParam(prefix + "_end_h")) {
-        dmxWeekdayEndHour[day] = request->getParam(prefix + "_end_h")->value().toInt();
-      }
-      if (request->hasParam(prefix + "_end_m")) {
-        dmxWeekdayEndMinute[day] = request->getParam(prefix + "_end_m")->value().toInt();
-      }
-      
-      // Validate ranges
-      if (dmxWeekdayStartHour[day] > 23) dmxWeekdayStartHour[day] = 23;
-      if (dmxWeekdayStartMinute[day] > 59) dmxWeekdayStartMinute[day] = 59;
-      if (dmxWeekdayEndHour[day] > 23) dmxWeekdayEndHour[day] = 23;
-      if (dmxWeekdayEndMinute[day] > 59) dmxWeekdayEndMinute[day] = 59;
-    }
-    
-    timeControlEnabled = request->hasParam("enabled") && request->getParam("enabled")->value() == "1";
-    
-    saveTimeControl();
-    request->redirect("/");
-  });
-  
-  // Keep old routes for backward compatibility
-  server.on("/save", HTTP_GET, [](AsyncWebServerRequest *request){
-    saveEEPROM();
-    request->redirect("/");
-  });
-  
+  registerSystemRoutes(server);
 
   server.addHandler(new CaptiveRequestHandler()).setFilter(ON_AP_FILTER);//only when requested from AP
 
@@ -1163,6 +770,11 @@ void loop(){
   
   // Reset watchdog at start of loop
   esp_task_wdt_reset();
+
+  // restart requested by the web interface: give the HTTP response time to go out first
+  static unsigned long restartAt = 0;
+  if (restartRequested && !restartAt) restartAt = millis() + 1500;
+  if (restartAt && (long)(millis() - restartAt) >= 0) ESP.restart();
   
   processOTA();
 #ifdef HAS_LORA

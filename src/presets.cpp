@@ -57,7 +57,11 @@ static bool savePresets() {
   return writeFile(PRESETS_FILE, doc);
 }
 
-static void saveRefs() {
+// References changed in RAM; the file is only written with the snapshot (Save).
+static void saveRefs() { refsVersion++; }
+
+void presetsSnapshotSave() {
+  Guard g;
   JsonDocument doc;
   JsonArray arr = doc.to<JsonArray>();
   for (const PresetRef& r : refs) {
@@ -66,8 +70,13 @@ static void saveRefs() {
     e.add(r.group);
     e.add(r.presetId);
   }
-  refsVersion++;
   writeFile(REFS_FILE, doc);
+}
+
+void presetsClearRefs() {
+  Guard g;
+  refs.clear();
+  refsVersion++;
 }
 
 void presetsLoad() {
@@ -107,6 +116,20 @@ void presetsLoad() {
       }
     }
     rf.close();
+  }
+  // the snapshot stores references, not values: bring the referenced presets back live
+  for (const PresetRef& r : refs) {
+    Fixture* f = findFixture(r.fixtureId);
+    Preset* p = nullptr;
+    for (Preset& q : presets) if (q.id == r.presetId) p = &q;
+    if (!f || !p) continue;
+    auto it = p->values.find(presetKey(*f, p->group));
+    if (it == p->values.end()) continue;
+    uint16_t n = fixtureChannelCount(*f);
+    for (const auto& cv : it->second) {
+      uint16_t dmx = f->address + cv.first;
+      if (cv.first < n && dmx >= 1 && dmx <= DMX_UNIVERSE_SIZE) data[dmx] = cv.second;
+    }
   }
   Serial.printf("Presets: %u, active references: %u\n", (unsigned)presets.size(), (unsigned)refs.size());
 }
@@ -190,10 +213,10 @@ static std::vector<std::pair<uint16_t, uint8_t>> captureValues(const Fixture& f,
 String presetCreate(uint16_t fixtureId, uint8_t group, const String& name) {
   Guard g;
   Fixture* f = findFixture(fixtureId);
-  if (!f) return "Fixture nicht gefunden";
-  if (group >= GROUP_COUNT) return "Ungültige Gruppe";
+  if (!f) return "Fixture not found";
+  if (group >= GROUP_COUNT) return "Invalid group";
   auto vals = captureValues(*f, group);
-  if (vals.empty()) return "Das Fixture hat keine Kanäle in dieser Gruppe";
+  if (vals.empty()) return "The fixture has no channels in this group";
   Preset p;
   p.id = nextPresetId++;
   p.name = name;
@@ -203,7 +226,7 @@ String presetCreate(uint16_t fixtureId, uint8_t group, const String& name) {
   p.group = group;
   p.values[presetKey(*f, group)] = vals;
   presets.push_back(p);
-  if (!savePresets()) return "Speichern fehlgeschlagen";
+  if (!savePresets()) return "Saving failed";
   setRef(f->id, group, p.id);
   return "";
 }
@@ -212,12 +235,12 @@ String presetStore(uint16_t fixtureId, uint16_t presetId) {
   Guard g;
   Fixture* f = findFixture(fixtureId);
   Preset* p = findPreset(presetId);
-  if (!f || !p) return "Fixture oder Preset nicht gefunden";
+  if (!f || !p) return "Fixture or preset not found";
   auto vals = captureValues(*f, p->group);
-  if (vals.empty()) return "Das Fixture hat keine Kanäle in dieser Gruppe";
+  if (vals.empty()) return "The fixture has no channels in this group";
   String key = presetKey(*f, p->group);
   p->values[key] = vals;
-  if (!savePresets()) return "Speichern fehlgeschlagen";
+  if (!savePresets()) return "Saving failed";
   setRef(f->id, p->group, p->id);
   // live update of every fixture that follows this preset with the same key
   for (const PresetRef& r : refs) {
@@ -232,9 +255,9 @@ String presetRecall(uint16_t fixtureId, uint16_t presetId) {
   Guard g;
   Fixture* f = findFixture(fixtureId);
   Preset* p = findPreset(presetId);
-  if (!f || !p) return "Fixture oder Preset nicht gefunden";
+  if (!f || !p) return "Fixture or preset not found";
   auto it = p->values.find(presetKey(*f, p->group));
-  if (it == p->values.end()) return "Preset '" + p->name + "' ist für dieses Fixture nicht gespeichert";
+  if (it == p->values.end()) return "Preset '" + p->name + "' is not stored for this fixture";
   applyValues(*f, it->second);
   setRef(f->id, p->group, p->id);
   return "";
@@ -243,24 +266,24 @@ String presetRecall(uint16_t fixtureId, uint16_t presetId) {
 String presetRename(uint16_t presetId, const String& name) {
   Guard g;
   Preset* p = findPreset(presetId);
-  if (!p) return "Preset nicht gefunden";
+  if (!p) return "Preset not found";
   String n = name;
   n.trim();
-  if (n.isEmpty()) return "Name fehlt";
+  if (n.isEmpty()) return "Name missing";
   p->name = n.substring(0, FIXTURE_NAME_MAX);
-  return savePresets() ? "" : "Speichern fehlgeschlagen";
+  return savePresets() ? "" : "Saving failed";
 }
 
 String presetDelete(uint16_t presetId) {
   Guard g;
   auto it = std::find_if(presets.begin(), presets.end(), [presetId](const Preset& p) { return p.id == presetId; });
-  if (it == presets.end()) return "Preset nicht gefunden";
+  if (it == presets.end()) return "Preset not found";
   presets.erase(it);
   size_t before = refs.size();
   refs.erase(std::remove_if(refs.begin(), refs.end(), [presetId](const PresetRef& r) { return r.presetId == presetId; }),
              refs.end());
   if (refs.size() != before) saveRefs();
-  return savePresets() ? "" : "Speichern fehlgeschlagen";
+  return savePresets() ? "" : "Saving failed";
 }
 
 void presetChannelsChanged(uint16_t dmxFrom, uint16_t dmxTo) {

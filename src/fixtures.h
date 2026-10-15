@@ -104,9 +104,14 @@ String saveDef(FixtureDef& d);   // d.id == 0 creates a new definition
 String deleteDef(uint16_t id);
 
 void defToJson(const FixtureDef& d, JsonObject obj);
+// CRC32 over the JSON form: identical definitions on different boxes have the same value.
+uint32_t defCrc(const FixtureDef& d);
+FixtureDef* findDefByCrc(uint32_t crc);
 // Imports DmxBox/labX format (object, or array of objects). Returns number of
 // created definitions; err is set on failure.
 int importDefs(JsonVariantConst root, String& err);
+// Creates one definition from a single-mode DmxBox JSON object; returns its id, 0 on error.
+uint16_t importSingleDef(JsonVariantConst root, String& err);
 
 // Text format used by the definition editor, one channel per line:
 //   Name | type | 0-9 Open; 10-19 Red; 20 Blue

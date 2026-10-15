@@ -54,11 +54,11 @@ void displayUpdate(const DisplayStatus& s) {
   oled.setTextAlignment(TEXT_ALIGN_LEFT);
   oled.drawHorizontalLine(0, 12, 128);
 
-  oled.drawString(0, 14, String(s.apMode ? "AP: " : "WLAN: ") + s.ssid);
+  oled.drawString(0, 14, String(s.apMode ? "AP: " : "WiFi: ") + s.ssid);
   oled.drawString(0, 26, s.ip);
   oled.setTextAlignment(TEXT_ALIGN_RIGHT);
   if (s.apMode) {
-    oled.drawString(128, 26, String(s.apClients) + " Clients");
+    oled.drawString(128, 26, String(s.apClients) + " clients");
   } else {
     oled.drawString(128, 26, String(s.rssi) + " dBm");
   }
@@ -67,11 +67,11 @@ void displayUpdate(const DisplayStatus& s) {
   oled.drawHorizontalLine(0, 40, 128);
   String dmx;
   if (!s.dmxReady) {
-    dmx = "DMX: FEHLER";
+    dmx = "DMX: ERROR";
   } else if (s.dmxActive) {
-    dmx = "DMX: aktiv";
+    dmx = "DMX: active";
   } else {
-    dmx = "DMX: Pause (Zeitpl.)";
+    dmx = "DMX: paused (sched.)";
   }
   oled.drawString(0, 42, dmx);
   if (s.dmxReady) {
@@ -85,7 +85,7 @@ void displayUpdate(const DisplayStatus& s) {
   if (s.linkPeers >= 0) {
     oled.setTextAlignment(TEXT_ALIGN_RIGHT);
     // count includes this box
-    oled.drawString(128, 53, s.linkPeers == 0 ? String("LoRa: allein") : "LoRa: " + String(s.linkPeers + 1) + " Boxen");
+    oled.drawString(128, 53, s.linkPeers == 0 ? String("LoRa: alone") : "LoRa: " + String(s.linkPeers + 1) + " boxes");
     oled.setTextAlignment(TEXT_ALIGN_LEFT);
   }
 

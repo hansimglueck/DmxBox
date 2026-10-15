@@ -17,6 +17,9 @@ struct FaderGrid {
   uint32_t reloadDelayMs = 0;  // remote boxes need time until the change comes back over the link
   String valuesJson;           // initial channel values (index = channel)
   String refsJson = "{}";      // initial active presets {"<group>": presetId}
+  String version;              // fixture/preset list version; the page reloads when the API reports another
+  uint16_t box = 0;            // remote box id (0 = this box): preset actions wait for its confirmation
+  String boxName;
 };
 
 void faderTabs(AsyncResponseStream* r, const std::vector<uint8_t>& groupsPresent);

@@ -3,41 +3,42 @@
 #include <ArduinoJson.h>
 
 const char FADER_HEAD[] PROGMEM = R"HTML(<style>
-#ftabs{display:flex;flex-wrap:wrap;justify-content:center;gap:6px;max-width:980px;margin:12px auto 4px}
-#ftabs button{background:#2a2a2a;border:1px solid #555;color:#e0e0e0;font-size:16px;padding:8px 12px;border-radius:8px;cursor:pointer}
-#ftabs button.on{background:#4CAF50;border-color:#4CAF50;color:#fff}
-#ftabs small{display:block;font-size:11px;color:#ffd54f;min-height:0}
-#ftabs button.on small{color:#fff}
-.fgrid{display:flex;flex-wrap:wrap;justify-content:center;gap:10px;max-width:980px;margin:10px auto}
-.fcard{width:140px;background:#2a2a2a;border:1px solid #555;border-radius:10px;padding:8px;box-sizing:border-box}
-.fname{font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:6px}
-.fenc{position:relative;height:220px;border-radius:12px;background:linear-gradient(180deg,#0f172a 0%,#1e293b 100%);
- border:2px solid #334155;cursor:grab;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
-.fenc.drag{cursor:grabbing;border-color:#3b82f6}
-.ftrk{position:absolute;top:12px;bottom:12px;left:50%;transform:translateX(-50%);width:6px;background:#475569;border-radius:3px;pointer-events:none}
-.ffill{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);width:6px;background:#3b82f6;border-radius:3px;pointer-events:none}
-.find{position:absolute;left:50%;transform:translateX(-50%);width:44px;height:8px;background:#3b82f6;border-radius:4px;
- bottom:12px;box-shadow:0 0 8px rgba(59,130,246,.5);pointer-events:none}
-.fval{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:28px;font-weight:700;color:#f1f5f9;
- text-shadow:0 2px 8px rgba(0,0,0,.6);pointer-events:none}
-.fpct{position:absolute;top:calc(50% + 22px);left:50%;transform:translateX(-50%);font-size:12px;color:#94a3b8;pointer-events:none}
-.fcard.pend .fval{color:#ff9800}
-.frng{font-size:13px;color:#2196F3;min-height:17px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.fsel{width:100%;font-size:14px;padding:4px;margin-top:4px}
-.fgran{display:inline-flex;background:#0f172a;border-radius:8px;padding:2px;margin-top:6px}
-.fgran button{background:transparent;border:none;color:#94a3b8;font-size:13px;padding:5px 9px;border-radius:6px;cursor:pointer}
-.fgran button.on{background:#3b82f6;color:#fff}
-.faddr{font-size:12px;color:#888;margin-top:4px}
-.ppanel{max-width:980px;margin:14px auto;padding:10px;background:#222;border:1px solid #444;border-radius:10px}
-.ptitle{color:#aaa;font-size:15px;margin-bottom:6px}
-.plist{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-bottom:6px}
-.pitem{display:inline-flex;flex-direction:column;align-items:center}
-.pbtn{min-width:90px;background:#37474f;border:2px solid #546e7a;color:#fff;font-size:16px;padding:12px 10px;border-radius:8px;cursor:pointer}
-.pbtn.on{background:#ff9800;border-color:#ffb74d}
-.pbtn.ns{background:#2a2a2a;border-style:dashed;color:#888}
+#ftabs{display:flex;flex-wrap:wrap;gap:6px;margin:14px 0 4px}
+#ftabs button{background:var(--panel);border:1px solid var(--line);color:var(--text);font-size:14px;padding:7px 12px;border-radius:5px;cursor:pointer}
+#ftabs button.on{border-color:var(--accent);color:var(--accent)}
+#ftabs small{display:block;font-size:11px;color:var(--muted)}
+.fgrid{display:flex;flex-wrap:wrap;gap:10px;margin:10px 0}
+.fcard{width:140px;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:8px;text-align:center}
+.fname{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:6px}
+.fname a{color:var(--text)}
+.fenc{position:relative;height:220px;border-radius:6px;background:#0d0f12;border:1px solid var(--line);cursor:grab;overflow:hidden;
+ touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+.fenc.drag{cursor:grabbing;border-color:var(--accent)}
+.ftrk{position:absolute;top:12px;bottom:12px;left:50%;transform:translateX(-50%);width:4px;background:var(--line);border-radius:2px;pointer-events:none}
+.ffill{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);width:4px;background:var(--accent);border-radius:2px;pointer-events:none}
+.find{position:absolute;left:50%;transform:translateX(-50%);width:44px;height:6px;background:var(--accent);border-radius:3px;bottom:12px;pointer-events:none}
+.fval{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:26px;font-weight:600;color:var(--text);
+ font-family:ui-monospace,Menlo,monospace;pointer-events:none}
+.fpct{position:absolute;top:calc(50% + 20px);left:50%;transform:translateX(-50%);font-size:12px;color:var(--muted);pointer-events:none}
+.fcard.pend .fval{color:var(--warn)}
+.fcard.pend .fname::after{content:'';display:inline-block;width:9px;height:9px;margin-left:6px;border:2px solid var(--line);
+ border-top-color:var(--accent);border-radius:50%;animation:sp .8s linear infinite;vertical-align:-1px}
+.frng{font-size:12px;color:var(--muted);min-height:16px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fsel{font-size:13px;padding:4px;margin-top:4px}
+.fgran{display:inline-flex;border:1px solid var(--line);border-radius:5px;margin-top:6px}
+.fgran button{background:transparent;border:none;color:var(--muted);font-size:12px;padding:4px 8px;cursor:pointer;font-family:ui-monospace,Menlo,monospace}
+.fgran button.on{background:var(--accent);color:#fff}
+.faddr{font-size:11px;color:var(--muted);margin-top:4px;font-family:ui-monospace,Menlo,monospace}
+.ppanel{margin:14px 0;padding:10px 12px;background:var(--panel);border:1px solid var(--line);border-radius:6px}
+.ptitle{color:var(--muted);font-size:13px;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em}
+.plist{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
+.pitem{display:inline-flex;flex-direction:column;align-items:stretch}
+.pbtn{min-width:90px;background:#0d0f12;border:1px solid var(--line);color:var(--text);font-size:15px;padding:11px 10px;border-radius:5px;cursor:pointer}
+.pbtn.on{border-color:var(--accent);color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.pbtn.ns{border-style:dashed;color:var(--muted)}
 .pedit{display:none;gap:2px;margin-top:3px}
-.ppanel.editing .pedit{display:inline-flex}
-.pedit button{background:#333;border:1px solid #555;color:#ddd;font-size:14px;padding:3px 7px;border-radius:5px;cursor:pointer}
+.ppanel.editing .pedit{display:flex}
+.pedit button{flex:1;background:transparent;border:1px solid var(--line);color:var(--muted);font-size:11px;padding:3px 4px;border-radius:4px;cursor:pointer}
 </style>)HTML";
 
 static const char FADER_JS[] PROGMEM = R"JS(<script>
@@ -109,29 +110,51 @@ G.addEventListener('change',e=>{const s=e.target.closest('.fsel');if(!s||s.value
 function poll(force){
   if(!force&&(drag||Date.now()<holdUntil))return;
   fetch(G.dataset.get).then(r=>r.json()).then(j=>{if(drag||(!force&&Date.now()<holdUntil))return;
+    if(j.ver!==undefined&&G.dataset.ver&&String(j.ver)!==G.dataset.ver){location.reload();return}
+    if(j.on!==undefined)document.body.classList.toggle('boxoff',!j.on);
     vals=j.v;pend=j.p||[];refs=j.r||{};cards.forEach(show);showRefs()}).catch(()=>{});
 }
+let waitVerUntil=0;
+// after a remote recall: keep the spinner until the box reports the preset as active
+function waitRef(g,p,until){fetch(G.dataset.get).then(r=>r.json()).then(j=>{
+  if((j.r||{})[g]===p||Date.now()>until){vals=j.v;pend=j.p||[];refs=j.r||{};cards.forEach(show);showRefs();busy(false)}
+  else setTimeout(()=>waitRef(g,p,until),300)}).catch(()=>busy(false))}
+// Remote boxes: keep a spinner up until the box confirmed over the link; list changes then wait
+// for the new fixture list (a version change reloads the page).
 function op(o,g,p,name,reload){
+  const box=+G.dataset.box;
   let u=G.dataset.pre+'&op='+o+'&g='+g+(p!==undefined?'&p='+p:'')+(name!==undefined?'&name='+encodeURIComponent(name):'');
+  if(box)busy(true,o==='recall'?'Recalling preset on '+G.dataset.boxname+'…':'Sending to '+G.dataset.boxname+'…');
   fetch(u,{method:'POST'}).then(r=>r.ok?r.text():r.text().then(t=>{throw t}))
-    .then(()=>setTimeout(()=>reload?location.reload():poll(true),+G.dataset.delay+150))
-    .catch(t=>{alert('Fehler: '+t);poll(true)});
+    .then(()=>box?waitLink(box,12000):true)
+    .then(ok=>{
+      if(!box){reload?location.reload():poll(true);return}
+      if(!ok){busy(false);alert('No answer from '+G.dataset.boxname);poll(true);return}
+      fetch(G.dataset.get).then(r=>r.json()).then(j=>{
+        if(j.err){busy(false);alert(G.dataset.boxname+': '+j.err);poll(true);return}
+        if(o==='recall'){refs[g]=+p;showRefs();holdUntil=Date.now()+3000;waitRef(g,+p,Date.now()+3000);return}
+        if(!reload){poll(true);setTimeout(()=>busy(false),200);return}
+        waitVerUntil=Date.now()+8000;
+      });
+    })
+    .catch(t=>{busy(false);alert('Error: '+t);poll(true)});
 }
+setInterval(()=>{if(!waitVerUntil)return;if(Date.now()>waitVerUntil)location.reload();else poll(true)},600);
 document.addEventListener('click',e=>{
   const pn=e.target.closest('.ppanel');if(!pn)return;const g=pn.dataset.g;
   const ed=e.target.closest('[data-op]');
   if(ed){
     const o=ed.dataset.op,it=ed.closest('.pitem'),p=it?it.dataset.p:undefined;
     if(o==='edit')pn.classList.toggle('editing');
-    else if(o==='create'){const n=prompt('Name des neuen Presets:');if(n!==null)op('create',g,undefined,n,true)}
-    else if(o==='store'){if(confirm('Preset mit den aktuellen Werten überspeichern?'))op('store',g,p,undefined,true)}
-    else if(o==='rename'){const n=prompt('Neuer Name:',it.querySelector('.pbtn').textContent);if(n)op('rename',g,p,n,true)}
-    else if(o==='delete'){if(confirm('Preset löschen?'))op('delete',g,p,undefined,true)}
+    else if(o==='create'){const n=prompt('Name of the new preset:');if(n!==null)op('create',g,undefined,n,true)}
+    else if(o==='store'){if(confirm('Overwrite the preset with the current values?'))op('store',g,p,undefined,true)}
+    else if(o==='rename'){const n=prompt('New name:',it.querySelector('.pbtn').textContent);if(n)op('rename',g,p,n,true)}
+    else if(o==='delete'){if(confirm('Delete preset?'))op('delete',g,p,undefined,true)}
     return;
   }
   const b=e.target.closest('.pbtn');if(!b)return;
   if(b.classList.contains('ns')){
-    if(confirm('„'+b.textContent+'“ ist für dieses Fixture noch nicht gespeichert. Mit den aktuellen Werten speichern?'))op('store',g,b.dataset.p,undefined,true);
+    if(confirm('"'+b.textContent+'" is not stored for this fixture yet. Store the current values?'))op('store',g,b.dataset.p,undefined,true);
     return;
   }
   refs[g]=+b.dataset.p;showRefs();holdUntil=0;op('recall',g,b.dataset.p,undefined,false);
@@ -156,16 +179,16 @@ std::vector<uint8_t> groupsPresent(const std::vector<uint8_t>& channelGroups) {
 }
 
 void faderTabs(AsyncResponseStream* r, const std::vector<uint8_t>& groups) {
-  r->print("<div id='ftabs'><button data-g='all'>Alle</button>");
+  r->print("<div id='ftabs'><button data-g='all'>All</button>");
   for (uint8_t g : groups) r->printf("<button data-g='%u'>%s<small></small></button>", g, GROUP_NAMES[g]);
   r->print("</div>");
 }
 
 void faderGridBegin(AsyncResponseStream* r, const FaderGrid& g) {
   r->printf("<div id='faders' class='fgrid' data-set='%s' data-get='%s' data-pre='%s' data-poll='%u' data-delay='%u' "
-            "data-th='80' data-v='%s' data-r='%s'>",
+            "data-th='80' data-v='%s' data-r='%s' data-ver='%s' data-box='%u' data-boxname='%s'>",
             esc(g.setUrl).c_str(), esc(g.getUrl).c_str(), esc(g.presetUrl).c_str(), g.pollMs, g.reloadDelayMs,
-            esc(g.valuesJson).c_str(), esc(g.refsJson).c_str());
+            esc(g.valuesJson).c_str(), esc(g.refsJson).c_str(), esc(g.version).c_str(), g.box, esc(g.boxName).c_str());
 }
 
 void faderCard(AsyncResponseStream* r, const String& name, const String& detailUrl, uint16_t ch, int16_t fine,
@@ -190,7 +213,7 @@ void faderCard(AsyncResponseStream* r, const String& name, const String& detailU
   r->print("<div class='fenc'><div class='ftrk'></div><div class='ffill'></div><div class='find'></div>"
            "<div class='fval'>0</div><div class='fpct'></div></div><div class='frng'></div>");
   if (ranges && !ranges->empty()) {
-    r->print("<select class='fsel'><option value=''>Bereich…</option>");
+    r->print("<select class='fsel'><option value=''>Range…</option>");
     for (const ChannelRange& cr : *ranges) {
       r->printf("<option value='%u'>%s</option>", cr.from, esc(cr.name.isEmpty() ? String(cr.from) : cr.name).c_str());
     }
@@ -211,16 +234,16 @@ void faderGridEnd(AsyncResponseStream* r) { r->print("</div>"); }
 
 void faderPresetPanel(AsyncResponseStream* r, uint8_t group, const std::vector<PresetInfo>& list, int activeId) {
   r->printf("<div class='ppanel' data-g='%u' style='display:none'><div class='ptitle'>Presets %s%s</div><div class='plist'>",
-            group, GROUP_NAMES[group], groupIsSelective(group) ? " (pro Fixture)" : " (pro Fixture-Typ)");
-  if (list.empty()) r->print("<span class='meta'>Noch keine Presets in dieser Gruppe.</span>");
+            group, GROUP_NAMES[group], groupIsSelective(group) ? " – per fixture" : " – per fixture type");
+  if (list.empty()) r->print("<span class='meta'>No presets in this group yet.</span>");
   for (const PresetInfo& p : list) {
     r->printf("<span class='pitem' data-p='%u'><button class='pbtn%s%s' data-p='%u'>%s</button>"
-              "<span class='pedit'><button data-op='store' title='Überspeichern'>💾</button>"
-              "<button data-op='rename' title='Umbenennen'>✎</button><button data-op='delete' title='Löschen'>🗑</button></span></span>",
+              "<span class='pedit'><button data-op='store'>Store</button>"
+              "<button data-op='rename'>Rename</button><button data-op='delete'>Delete</button></span></span>",
               p.id, p.stored ? "" : " ns", (int)p.id == activeId ? " on" : "", p.id, esc(p.name).c_str());
   }
-  r->print("</div><button class='button' data-op='create'>+ Preset</button>"
-           "<button class='button b-grey' data-op='edit'>Bearbeiten</button></div>");
+  r->print("</div><div class='row'><button class='btn' data-op='create'>+ Preset</button>"
+           "<button class='btn' data-op='edit'>Edit presets</button></div></div>");
 }
 
 void faderScript(AsyncResponseStream* r) { r->print(FPSTR(FADER_JS)); }

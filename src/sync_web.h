@@ -3,6 +3,6 @@
 #include <ESPAsyncWebServer.h>
 
 void registerSyncRoutes(AsyncWebServer& server);
-void renderLocalBoxHeader(AsyncResponseStream* r);
-void renderRemoteFixtures(AsyncResponseStream* r);
+void renderRemoteTiles(AsyncResponseStream* r);
+void renderLoraSection(AsyncResponseStream* r);
 #endif

@@ -1,6 +1,7 @@
 #include "fixtures.h"
 #include <LittleFS.h>
 #include <algorithm>
+#include <esp_rom_crc.h>
 
 std::vector<FixtureDef> fixtureDefs;
 std::vector<Fixture> fixtureList;
@@ -254,6 +255,19 @@ void defToJson(const FixtureDef& d, JsonObject obj) {
   }
 }
 
+uint32_t defCrc(const FixtureDef& d) {
+  JsonDocument doc;
+  defToJson(d, doc.to<JsonObject>());
+  String s;
+  serializeJson(doc, s);
+  return esp_rom_crc32_le(0, (const uint8_t*)s.c_str(), s.length());
+}
+
+FixtureDef* findDefByCrc(uint32_t crc) {
+  for (FixtureDef& d : fixtureDefs) if (defCrc(d) == crc) return &d;
+  return nullptr;
+}
+
 // ---------- load / save ----------
 
 static bool writePatch() {
@@ -448,16 +462,16 @@ String saveFixture(Fixture& f) {
   FixLock lock;
   version++;
   f.name = clip(f.name, FIXTURE_NAME_MAX);
-  if (f.defId != 0 && !findDef(f.defId)) return "Definition nicht gefunden";
+  if (f.defId != 0 && !findDef(f.defId)) return "Definition not found";
   if (f.defId == 0 && (f.channelCount < 1 || f.channelCount > DMX_UNIVERSE_SIZE)) {
-    return "Kanalanzahl muss zwischen 1 und 512 liegen";
+    return "Channel count must be between 1 and 512";
   }
   uint16_t count = fixtureChannelCount(f);
-  if (count == 0) return "Die Definition hat keine Kanäle";
-  if (f.address < 1 || f.address > DMX_UNIVERSE_SIZE) return "Adresse muss zwischen 1 und 512 liegen";
+  if (count == 0) return "The definition has no channels";
+  if (f.address < 1 || f.address > DMX_UNIVERSE_SIZE) return "Address must be between 1 and 512";
   if (f.address + count - 1 > DMX_UNIVERSE_SIZE) {
-    return "Adresse " + String(f.address) + " + " + String(count) +
-           " Kanäle passt nicht ins Universum (letzter Kanal wäre " + String(f.address + count - 1) + ")";
+    return "Address " + String(f.address) + " + " + String(count) +
+           " channels does not fit into the universe (last channel would be " + String(f.address + count - 1) + ")";
   }
   if (f.defId == 0) {
     if (f.channelNames.size() > f.channelCount) f.channelNames.resize(f.channelCount);
@@ -471,13 +485,13 @@ String saveFixture(Fixture& f) {
     fixtureList.push_back(f);
   } else {
     Fixture* existing = findFixture(f.id);
-    if (!existing) return "Fixture nicht gefunden";
+    if (!existing) return "Fixture not found";
     if (f.name.isEmpty()) f.name = "Fixture " + String(f.id);
     *existing = f;
   }
   std::sort(fixtureList.begin(), fixtureList.end(),
             [](const Fixture& a, const Fixture& b) { return a.address < b.address; });
-  if (!writePatch()) return "Speichern fehlgeschlagen";
+  if (!writePatch()) return "Saving failed";
   return "";
 }
 
@@ -485,9 +499,9 @@ String deleteFixture(uint16_t id) {
   FixLock lock;
   version++;
   auto it = std::find_if(fixtureList.begin(), fixtureList.end(), [id](const Fixture& f) { return f.id == id; });
-  if (it == fixtureList.end()) return "Fixture nicht gefunden";
+  if (it == fixtureList.end()) return "Fixture not found";
   fixtureList.erase(it);
-  if (!writePatch()) return "Speichern fehlgeschlagen";
+  if (!writePatch()) return "Saving failed";
   return "";
 }
 
@@ -496,22 +510,22 @@ String saveDef(FixtureDef& d) {
   version++;
   d.name = clip(d.name, FIXTURE_NAME_MAX);
   d.manufacturer = clip(d.manufacturer, FIXTURE_NAME_MAX);
-  if (d.name.isEmpty()) return "Name fehlt";
-  if (d.channels.empty()) return "Mindestens ein Kanal nötig";
-  if (d.channels.size() > DMX_UNIVERSE_SIZE) return "Maximal 512 Kanäle";
+  if (d.name.isEmpty()) return "Name missing";
+  if (d.channels.empty()) return "At least one channel required";
+  if (d.channels.size() > DMX_UNIVERSE_SIZE) return "At most 512 channels";
 
   if (d.id != 0) {
-    if (!findDef(d.id)) return "Definition nicht gefunden";
+    if (!findDef(d.id)) return "Definition not found";
     for (const Fixture& f : fixtureList) {
       if (f.defId == d.id && f.address + d.channels.size() - 1 > DMX_UNIVERSE_SIZE) {
-        return "Fixture '" + f.name + "' (Adresse " + String(f.address) + ") hätte mit " +
-               String(d.channels.size()) + " Kanälen keinen Platz mehr";
+        return "Fixture '" + f.name + "' (address " + String(f.address) + ") would not fit with " +
+               String(d.channels.size()) + " channels";
       }
     }
   } else {
     d.id = nextDefId++;
   }
-  if (!writeDef(d)) return "Speichern fehlgeschlagen";
+  if (!writeDef(d)) return "Saving failed";
 
   FixtureDef* existing = findDef(d.id);
   if (existing) *existing = d;
@@ -524,12 +538,12 @@ String saveDef(FixtureDef& d) {
 String deleteDef(uint16_t id) {
   FixLock lock;
   version++;
-  if (!findDef(id)) return "Definition nicht gefunden";
+  if (!findDef(id)) return "Definition not found";
   String users;
   for (const Fixture& f : fixtureList) {
     if (f.defId == id) users += (users.isEmpty() ? "" : ", ") + f.name;
   }
-  if (!users.isEmpty()) return "Wird noch verwendet von: " + users;
+  if (!users.isEmpty()) return "Still used by: " + users;
   LittleFS.remove(defPath(id));
   fixtureDefs.erase(std::remove_if(fixtureDefs.begin(), fixtureDefs.end(),
                                    [id](const FixtureDef& d) { return d.id == id; }),
@@ -556,7 +570,7 @@ static int importOne(JsonObjectConst obj, String& err) {
     modes.push_back({name, obj["channels"].as<JsonArrayConst>()});
   }
   if (modes.empty()) {
-    err = "'" + name + "': keine Kanäle gefunden (erwartet: modes[].channels[] oder channels[])";
+    err = "'" + name + "': no channels found (expected modes[].channels[] or channels[])";
     return 0;
   }
 
@@ -576,6 +590,23 @@ static int importOne(JsonObjectConst obj, String& err) {
   return created;
 }
 
+uint16_t importSingleDef(JsonVariantConst root, String& err) {
+  JsonObjectConst obj = root.as<JsonObjectConst>();
+  if (obj.isNull()) {
+    err = "JSON must be an object";
+    return 0;
+  }
+  FixtureDef d;
+  d.name = clip(obj["name"] | "", FIXTURE_NAME_MAX);
+  if (d.name.isEmpty()) d.name = "Import";
+  d.manufacturer = clip(obj["manufacturer"] | "", FIXTURE_NAME_MAX);
+  JsonArrayConst chans = obj["modes"][0]["channels"].as<JsonArrayConst>();
+  if (chans.isNull()) chans = obj["channels"].as<JsonArrayConst>();
+  parseChannels(chans, d.channels);
+  err = saveDef(d);
+  return err.isEmpty() ? d.id : 0;
+}
+
 int importDefs(JsonVariantConst root, String& err) {
   int created = 0;
   if (root.is<JsonArrayConst>()) {
@@ -583,7 +614,7 @@ int importDefs(JsonVariantConst root, String& err) {
   } else if (root.is<JsonObjectConst>()) {
     created = importOne(root.as<JsonObjectConst>(), err);
   } else {
-    err = "JSON muss ein Objekt oder Array sein";
+    err = "JSON must be an object or an array";
   }
   return created;
 }
@@ -647,13 +678,13 @@ static void skipSpaces(const String& s, int& pos) {
 // "10-19 Red" or "20 Blue" or "0-9"
 static String parseRange(const String& tok, ChannelRange& r) {
   int pos = 0;
-  if (!readByte(tok, pos, r.from)) return "ungültiger Bereich '" + tok + "'";
+  if (!readByte(tok, pos, r.from)) return "invalid range '" + tok + "'";
   r.to = r.from;
   skipSpaces(tok, pos);
   if (pos < (int)tok.length() && tok[pos] == '-') {
     pos++;
     skipSpaces(tok, pos);
-    if (!readByte(tok, pos, r.to)) return "ungültiger Bereich '" + tok + "'";
+    if (!readByte(tok, pos, r.to)) return "invalid range '" + tok + "'";
     if (r.from > r.to) std::swap(r.from, r.to);
   }
   r.name = clip(tok.substring(pos), FIXTURE_NAME_MAX);
@@ -701,7 +732,7 @@ String defChannelsFromText(const String& text, FixtureDef& d) {
         if (tok.isEmpty()) continue;
         ChannelRange r;
         String e = parseRange(tok, r);
-        if (!e.isEmpty()) return "Zeile " + String(lineNo + 1) + ": " + e;
+        if (!e.isEmpty()) return "Line " + String(lineNo + 1) + ": " + e;
         ch.ranges.push_back(r);
       }
     }

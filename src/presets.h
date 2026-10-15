@@ -47,3 +47,7 @@ String presetDelete(uint16_t presetId);
 // Channels changed by hand (fader, remote SET): breaks references of the affected groups.
 void presetChannelsChanged(uint16_t dmxFrom, uint16_t dmxTo);
 void presetsFixtureDeleted(uint16_t fixtureId);
+
+// Active references are part of the snapshot: written on Save, applied again at boot.
+void presetsSnapshotSave();
+void presetsClearRefs();
