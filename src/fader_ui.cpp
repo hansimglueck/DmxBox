@@ -30,15 +30,14 @@ static const char FADER_CSS[] PROGMEM = R"HTML(<style>
 .fpct{position:absolute;top:calc(50% + 20px);left:50%;transform:translateX(-50%);font-size:12px;color:var(--muted);pointer-events:none}
 .fcard.pend .fval{color:var(--warn)}
 .fcard.mk{border-color:var(--warn)}
-.fcard.mk .faddr::after{content:' · changed';color:var(--warn)}
+.fclr{display:block;font-size:12px;margin-top:5px;visibility:hidden;color:var(--warn)}
+.fcard.mk .fclr{visibility:visible}
 .fcard.pend .fname::after{content:'';display:inline-block;width:9px;height:9px;margin-left:6px;border:2px solid var(--line);
  border-top-color:var(--accent);border-radius:50%;animation:sp .8s linear infinite;vertical-align:-1px}
-.frng{font-size:12px;color:var(--muted);min-height:16px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.fsel{font-size:13px;padding:4px;margin-top:4px}
+.fsel{font-size:13px;padding:4px;margin-top:6px}
 .fgran{display:inline-flex;border:1px solid var(--line);border-radius:5px;margin-top:6px}
 .fgran button{background:transparent;border:none;color:var(--muted);font-size:12px;padding:4px 8px;cursor:pointer;font-family:ui-monospace,Menlo,monospace}
 .fgran button.on{background:var(--accent);color:#fff}
-.faddr{font-size:11px;color:var(--muted);margin-top:4px;font-family:ui-monospace,Menlo,monospace}
 @media(max-width:600px){
  .fgrid{gap:6px}
  .fcard{width:calc((100% - 18px) / 4);padding:5px 3px}
@@ -47,11 +46,10 @@ static const char FADER_CSS[] PROGMEM = R"HTML(<style>
  .find{width:70%}
  .fval{font-size:17px}
  .fpct{font-size:10px;top:calc(50% + 14px)}
- .frng{font-size:10px}
  .fsel{font-size:11px;padding:2px}
  .fgran{display:flex}
  .fgran button{flex:1;font-size:10px;padding:4px 0}
- .faddr{font-size:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .fclr{font-size:11px}
 }
 .finfo{margin-top:18px}
 .ppanel{margin:14px 0;padding:10px 12px;background:var(--panel);border:1px solid var(--line);border-radius:6px}
@@ -78,7 +76,7 @@ let mk=new Set(JSON.parse(G.dataset.m||'[]'));
 cards.forEach(c=>{const r=JSON.parse(c.dataset.r||'[]');if(!r.length)return;const s=document.createElement('select');s.className='fsel';
   const esc=t=>String(t).replace(/[&<>"]/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[x]));
   s.innerHTML='<option value="">Range…</option>'+r.map(x=>'<option value="'+x[0]+'">'+esc(x[2]||x[0])+'</option>').join('');
-  c.querySelector('.frng').after(s)});
+  c.querySelector('.fgran').after(s)});
 const is16=c=>+c.dataset.f>=0;
 const maxOf=c=>is16(c)?65535:255;
 const valOf=c=>is16(c)?((vals[+c.dataset.c]||0)<<8)|(vals[+c.dataset.f]||0):(vals[+c.dataset.c]||0);
@@ -91,7 +89,6 @@ function show(c){
   c.querySelector('.fpct').textContent=Math.round(p*100)+' %';
   const coarse=vals[+c.dataset.c]||0,r=JSON.parse(c.dataset.r||'[]');
   const hit=r.find(x=>coarse>=x[0]&&coarse<=x[1]);
-  c.querySelector('.frng').textContent=hit?hit[2]:'';
   const sel=c.querySelector('.fsel');if(sel&&document.activeElement!==sel)sel.value=hit?String(hit[0]):'';
   c.classList.toggle('pend',!!(pend[+c.dataset.c]||(is16(c)&&pend[+c.dataset.f])));
   c.classList.toggle('mk',mk.has(+c.dataset.c)||(is16(c)&&mk.has(+c.dataset.f)));
@@ -142,6 +139,12 @@ function end(){if(!drag)return;if(drag.pv!==null)send(drag.c,drag.pv);drag.enc.c
 G.addEventListener('pointerup',end);G.addEventListener('pointercancel',end);
 G.addEventListener('wheel',e=>{const enc=e.target.closest('.fenc');if(!enc)return;e.preventDefault();
   const c=enc.closest('.fcard');apply(c,valOf(c)+(e.deltaY<0?1:-1)*gran(c),true);holdUntil=Date.now()+1200},{passive:false});
+// clear: only this fader back to the cue value; a remote box answers over the link, so keep its
+// (old) mark from coming back with the next poll for a moment
+G.addEventListener('click',e=>{const a=e.target.closest('.fclr');if(!a)return;e.preventDefault();
+  const c=a.closest('.fcard');mk.delete(+c.dataset.c);if(is16(c))mk.delete(+c.dataset.f);show(c);
+  holdUntil=Date.now()+(+G.dataset.box?2500:0);
+  fetch(G.dataset.clr+'&ch='+c.dataset.c,{method:'POST'}).then(()=>{if(!+G.dataset.box)poll(true)}).catch(()=>{})});
 G.addEventListener('click',e=>{const b=e.target.closest('.fgran button');if(!b)return;
   b.parentNode.querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b))});
 G.addEventListener('change',e=>{const s=e.target.closest('.fsel');if(!s||s.value==='')return;
@@ -230,10 +233,10 @@ void faderTabs(AsyncResponseStream* r, const std::vector<uint8_t>& groups) {
 
 void faderGridBegin(AsyncResponseStream* r, const FaderGrid& g) {
   r->printf("<div id='faders' class='fgrid' data-set='%s' data-get='%s' data-pre='%s' data-poll='%u' data-delay='%u' "
-            "data-th='80' data-v='%s' data-r='%s' data-m='%s' data-ver='%s' data-box='%u' data-boxname='%s'>",
+            "data-th='80' data-v='%s' data-r='%s' data-m='%s' data-ver='%s' data-box='%u' data-boxname='%s' data-clr='%s'>",
             esc(g.setUrl).c_str(), esc(g.getUrl).c_str(), esc(g.presetUrl).c_str(), g.pollMs, g.reloadDelayMs,
             esc(g.valuesJson).c_str(), esc(g.refsJson).c_str(), esc(g.marksJson).c_str(), esc(g.version).c_str(), g.box,
-            esc(g.boxName).c_str());
+            esc(g.boxName).c_str(), esc(g.clearUrl).c_str());
 }
 
 void faderCard(AsyncResponseStream* r, const String& name, const String& detailUrl, uint16_t ch, int16_t fine,
@@ -256,16 +259,16 @@ void faderCard(AsyncResponseStream* r, const String& name, const String& detailU
   if (detailUrl.isEmpty()) r->printf("<div class='fname'>%s</div>", esc(name).c_str());
   else r->printf("<div class='fname'><a href='%s'>%s</a></div>", esc(detailUrl).c_str(), esc(name).c_str());
   r->print("<div class='fenc'><div class='ftrk'></div><div class='ffill'></div><div class='find'></div>"
-           "<div class='fval'>0</div><div class='fpct'></div></div><div class='frng'></div>");
+           "<div class='fval'>0</div><div class='fpct'></div></div>");
+  // sensitivity first, then the range select (added by the script), then "clear" for changed faders
   if (fine >= 0) {
     r->print("<div class='fgran'><button data-g='1'>1</button><button data-g='10'>10</button>"
              "<button data-g='100' class='on'>100</button></div>");
-    r->printf("<div class='faddr'>DMX %u + %d · 16 Bit</div></div>", address, fineAddress);
   } else {
     r->print("<div class='fgran'><button data-g='1' class='on'>1</button><button data-g='5'>5</button>"
              "<button data-g='10'>10</button></div>");
-    r->printf("<div class='faddr'>DMX %u</div></div>", address);
   }
+  r->print("<a class='fclr' href='#' title='Back to the value of the current cue'>clear</a></div>");
 }
 
 void faderGridEnd(AsyncResponseStream* r) { r->print("</div>"); }

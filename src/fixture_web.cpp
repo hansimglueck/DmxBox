@@ -114,7 +114,14 @@ body.lost header,body.lost main,body.lost footer{opacity:.3;filter:grayscale(1);
 .prow select{flex:1}
 #pseq{border:none;background:transparent;font-size:22px;font-weight:600;padding:2px 0;color:var(--text);cursor:pointer;min-width:0}
 #pplay{display:flex;align-items:center;gap:4px;padding:8px 14px}
-.mplay{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:6px;padding:6px 8px;margin:12px 0 4px}
+.mplay{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:6px;padding:6px 8px;margin:10px 0 4px;
+ position:sticky;top:6px;z-index:20;box-shadow:0 4px 12px rgba(0,0,0,.45)}
+.crumbs{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:12px 0 0;font-size:14px;color:var(--muted)}
+.crumbs a{color:var(--muted)}.crumbs a:hover{color:var(--accent)}
+.crumbs .sep{opacity:.6}.crumbs .cur{color:var(--text)}
+.crumbs .back{display:flex;align-items:center;justify-content:center;width:30px;height:30px;border:1px solid var(--line);border-radius:5px;
+ margin-right:4px;color:var(--text)}
+.crumbs .back svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
 .mline{display:flex;justify-content:space-between;gap:8px;font-size:14px;margin:0 2px 6px}
 .mcue{white-space:pre;overflow:hidden;text-overflow:ellipsis}
 .mcount{font-size:13px;white-space:nowrap}
@@ -264,6 +271,20 @@ void pageEnd(AsyncWebServerRequest* req, AsyncResponseStream* r) {
            "<a href='/timesetup'>Schedule</a></footer>");
   r->printf("<script src='%s'></script></body></html>", assetUrl("/s/monitor.js").c_str());
   req->send(r);
+}
+
+void crumbs(AsyncResponseStream* r, const std::vector<std::pair<String, String>>& path) {
+  String parent = "/";
+  for (size_t i = 0; i + 1 < path.size(); i++) if (!path[i].second.isEmpty()) parent = path[i].second;
+  r->printf("<nav class='crumbs'><a class='back' href='%s' aria-label='Back'><svg viewBox='0 0 24 24'><path d='M15 5l-7 7 7 7'/>"
+            "</svg></a><a href='/'>Home</a>", esc(parent).c_str());
+  for (size_t i = 0; i < path.size(); i++) {
+    r->print("<span class='sep'>›</span>");
+    if (i + 1 == path.size()) r->printf("<span class='cur'>%s</span>", esc(path[i].first).c_str());
+    else if (path[i].second.isEmpty()) r->printf("<span>%s</span>", esc(path[i].first).c_str());
+    else r->printf("<a href='%s'>%s</a>", esc(path[i].second).c_str(), esc(path[i].first).c_str());
+  }
+  r->print("</nav>");
 }
 
 void sendMessage(AsyncWebServerRequest* req, int code, const String& title, const String& msg) {
@@ -619,6 +640,7 @@ static void handleFixtureEdit(AsyncWebServerRequest* req) {
     if (!syncRemoteBox(boxId, b)) return sendMessage(req, 404, "Not found", "Box not known.");
     if (isNew) {
       AsyncResponseStream* r = pageBegin(req, "New Fixture");
+      crumbs(r, {{"New fixture", ""}});
       r->print("<h1>New Fixture</h1>");
       fixtureForm(r, boxId, true, 0, "", 1, "0", 1);
       return pageEnd(req, r);
@@ -627,6 +649,7 @@ static void handleFixtureEdit(AsyncWebServerRequest* req) {
     for (const RemoteFixture& f : b.fixtures) {
       if (f.id != id) continue;
       AsyncResponseStream* r = pageBegin(req, "Edit Fixture");
+      crumbs(r, {{b.peer.name, ""}, {f.name, "/remote/fixture?box=" + String(boxId) + "&id=" + String(f.id)}, {"Edit", ""}});
       r->printf("<h1>Edit %s</h1>", esc(f.name).c_str());
       fixtureForm(r, boxId, false, f.id, f.name, f.address, f.defId ? "R:" + String(f.defId) : String("0"), f.count);
       r->printf("<div class='row'><a class='btn danger' href='/fixture/delete?box=%u&id=%u'>Delete fixture</a>"
@@ -638,6 +661,7 @@ static void handleFixtureEdit(AsyncWebServerRequest* req) {
 #endif
   if (isNew) {
     AsyncResponseStream* r = pageBegin(req, "New Fixture");
+    crumbs(r, {{"New fixture", ""}});
     r->print("<h1>New Fixture</h1>");
     fixtureForm(r, 0, true, 0, "", 1, "0", 1);
     return pageEnd(req, r);
@@ -645,6 +669,7 @@ static void handleFixtureEdit(AsyncWebServerRequest* req) {
   Fixture* f = findFixture(arg(req, "id").toInt());
   if (!f) return sendMessage(req, 404, "Not found", "Fixture does not exist.");
   AsyncResponseStream* r = pageBegin(req, "Edit Fixture");
+  crumbs(r, {{f->name, "/fixture?id=" + String(f->id)}, {"Edit", ""}});
   r->printf("<h1>Edit %s</h1>", esc(f->name).c_str());
   fixtureForm(r, 0, false, f->id, f->name, f->address, f->defId ? "L:" + String(f->defId) : String("0"), f->channelCount);
   r->printf("<div class='row'><a class='btn danger' href='/fixture/delete?id=%u'>Delete fixture</a>"
@@ -785,6 +810,7 @@ static void handleFixturePage(AsyncWebServerRequest* req) {
   if (!fp) return req->redirect("/");
   const Fixture& f = *fp;
   AsyncResponseStream* r = pageBegin(req, f.name, faderHead().c_str());
+  crumbs(r, {{f.name, ""}});
   renderMiniPlayback(r);
   r->printf("<div class='titlebar'><h1>%s</h1><span class='row'>", esc(f.name).c_str());
   if (f.defId == 0) r->printf("<a class='btn' href='/fixturenames?id=%u'>Channel names</a>", f.id);
@@ -795,6 +821,7 @@ static void handleFixturePage(AsyncWebServerRequest* req) {
   faderTabs(r, present);
   FaderGrid grid;
   grid.setUrl = "/api/channel/set?fix=" + id;
+  grid.clearUrl = "/api/channel/clear?fix=" + id;
   grid.getUrl = "/api/channel/values?fix=" + id;
   grid.presetUrl = "/api/preset?fix=" + id;
   grid.valuesJson = fixtureValuesJson(f);
@@ -873,13 +900,26 @@ static void handleChannelSetApi(AsyncWebServerRequest* req) {
   req->send(200, "text/plain", "ok");
 }
 
+static void handleChannelClearApi(AsyncWebServerRequest* req) {
+  Fixture* fp = findFixture(arg(req, "fix").toInt());
+  int ch = arg(req, "ch").toInt();
+  if (!fp || ch < 0 || ch >= fixtureChannelCount(*fp)) return req->send(400, "text/plain", "bad request");
+  std::vector<int16_t> fine = fixtureFinePairs(*fp);
+  uint16_t dmx = fp->address + ch;
+  int16_t f = ch < (int)fine.size() ? fine[ch] : -1;
+  uint16_t first = f >= 0 ? min(dmx, (uint16_t)(fp->address + f)) : dmx;
+  uint16_t last = f >= 0 ? max(dmx, (uint16_t)(fp->address + f)) : dmx;
+  cuesClearChannels(first, last);
+  req->send(200, "text/plain", "ok");
+}
+
 static void renderChannel(AsyncWebServerRequest* req, const Fixture& f, int ch) {
   uint16_t dmx = f.address + ch;
   const ChannelDef* cdef = fixtureChannelDef(f, ch);
   String chName = fixtureChannelName(f, ch);
   AsyncResponseStream* r = pageBegin(req, chName);
-  r->printf("<p class='meta'><a href='/fixture?id=%u'>%s</a> · <span class='mono'>DMX %u</span></p>", f.id,
-            esc(f.name).c_str(), dmx);
+  crumbs(r, {{f.name, "/fixture?id=" + String(f.id)}, {chName, ""}});
+  r->printf("<p class='meta mono'>DMX %u</p>", dmx);
   r->printf("<h1>%s</h1>", esc(chName).c_str());
   r->printf("<div class='big'>%u</div>", data[dmx]);
   r->printf("<form class='row' action='/channel' method='get'><input type='hidden' name='fix' value='%u'>"
@@ -952,7 +992,8 @@ static void handleFixtureNames(AsyncWebServerRequest* req) {
   if (!fp || fp->defId != 0) return req->redirect("/");
   const Fixture& f = *fp;
   AsyncResponseStream* r = pageBegin(req, f.name + " – Channel names", NAME_PRESETS);
-  r->printf("<p class='meta'><a href='/fixture?id=%u'>%s</a></p><h1>Channel names</h1>", f.id, esc(f.name).c_str());
+  crumbs(r, {{f.name, "/fixture?id=" + String(f.id)}, {"Channel names", ""}});
+  r->print("<h1>Channel names</h1>");
   r->print("<div class='row'><span class='meta'>Template:</span>");
   const char* presetNames[] = {"SharpyPlus", "Beam330", "Beam230", "Beam230neu", "Beam230v21"};
   for (const char* p : presetNames) r->printf("<button class='btn' onclick='applyPreset(\"%s\")'>%s</button>", p, p);
@@ -995,6 +1036,7 @@ static int defUsage(uint16_t defId) {
 
 static void handleDefs(AsyncWebServerRequest* req) {
   AsyncResponseStream* r = pageBegin(req, "Definitions");
+  crumbs(r, {{"Definitions", ""}});
   r->print("<h1>Fixture definitions</h1>");
   r->print("<div class='row'><a class='btn' href='/def/edit'>+ New definition</a><a class='btn' href='/defs/import'>Import</a></div>");
   if (fixtureDefs.empty()) r->print("<p class='muted'>No definitions yet.</p>");
@@ -1022,7 +1064,8 @@ static void handleDefEdit(AsyncWebServerRequest* req) {
   int rows = max(8, (int)d.channels.size() + 3);
   if (rows > 30) rows = 30;
   AsyncResponseStream* r = pageBegin(req, isNew ? "New definition" : "Edit definition");
-  r->printf("<p class='meta'><a href='/defs'>Definitions</a></p><h1>%s</h1>", isNew ? "New definition" : esc(d.name).c_str());
+  crumbs(r, {{"Definitions", "/defs"}, {isNew ? String("New definition") : d.name, ""}});
+  r->printf("<h1>%s</h1>", isNew ? "New definition" : esc(d.name).c_str());
   r->print("<form class='f' action='/def/save' method='post'>");
   if (!isNew) r->printf("<input type='hidden' name='id' value='%u'>", d.id);
   r->printf("<label>Name</label><input name='name' maxlength='%d' value='%s'>", FIXTURE_NAME_MAX, esc(d.name).c_str());
@@ -1198,7 +1241,8 @@ function doImport(ev){
 
 static void handleImportPage(AsyncWebServerRequest* req) {
   AsyncResponseStream* r = pageBegin(req, "Import definition", IMPORT_SCRIPT);
-  r->print("<p class='meta'><a href='/defs'>Definitions</a></p><h1>Import definition</h1>");
+  crumbs(r, {{"Definitions", "/defs"}, {"Import", ""}});
+  r->print("<h1>Import definition</h1>");
   r->print("<form class='f' action='/api/defs/import' method='post' onsubmit='return doImport(event)'>");
   r->print("<label>Files</label><input type='file' multiple accept='.json,.xml,application/json,text/xml' onchange='loadFile(this)'>");
   r->print("<label>or paste</label><textarea id='json' name='json' rows='14'></textarea>");
@@ -1257,6 +1301,7 @@ void registerFixtureRoutes(AsyncWebServer& server) {
   server.on("/api/defs/import", HTTP_POST, handleImportApi);
   server.on("/api/channel/values", HTTP_GET, handleChannelValuesApi);
   server.on("/api/channel/set", HTTP_ANY, handleChannelSetApi);
+  server.on("/api/channel/clear", HTTP_POST, handleChannelClearApi);
   server.on("/api/preset", HTTP_ANY, handlePresetApi);
   // registered last: "/fixture" would otherwise also match "/fixture/..." prefixes
   server.on("/fixture", HTTP_GET, handleFixturePage);

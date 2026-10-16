@@ -127,6 +127,8 @@ void syncTransport(const CueTransport& t);
 void syncCueStore(const CueStoreResult& r);
 CueStoreStatus syncCueStoreStatus();
 void syncPing();
+// Puts channels on that box back to its cue value (see cuesClearChannels).
+void syncClearRemote(uint16_t box, uint16_t dmxFrom, uint16_t dmxTo);
 // Asks that box to install the newest firmware release (it needs internet itself).
 void syncFirmwareUpdate(uint16_t box);
 #endif

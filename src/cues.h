@@ -66,6 +66,8 @@ bool cuesMarked(uint16_t dmx);
 uint16_t cuesMarkCount();
 void cuesMarksBitmap(uint8_t out[64]);  // bit (dmx-1)
 uint32_t cuesMarksVersion();
+// Puts channels back to the current cue's value (the background) and removes their marks.
+void cuesClearChannels(uint16_t dmxFrom, uint16_t dmxTo);
 
 // Transport on this box. out = resulting state for the other boxes.
 String cuesTransport(uint8_t op, uint16_t arg, CueTransport& out);

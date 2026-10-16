@@ -305,6 +305,7 @@ static void handleFirmwareInstall(AsyncWebServerRequest* req) {
 
 static void handleConnectivity(AsyncWebServerRequest* req) {
   AsyncResponseStream* r = pageBegin(req, "Connectivity", "<meta http-equiv='refresh' content='15'>");
+  crumbs(r, {{"Connectivity", ""}});
   r->print("<h1>Connectivity</h1><h2 id='box'>Box</h2>");
   r->printf("<form class='row' action='/box/name' method='post'><input name='name' maxlength='32' value='%s' "
             "aria-label='Box name' style='flex:1'><button class='btn primary' type='submit'>Rename</button></form>",
@@ -390,6 +391,7 @@ static void handleWifiConnect(AsyncWebServerRequest* req) {
 
 static void handleTimeSetup(AsyncWebServerRequest* req) {
   AsyncResponseStream* r = pageBegin(req, "Schedule");
+  crumbs(r, {{"Schedule", ""}});
   r->printf("<h1>Schedule</h1><p class='meta'>%s</p>", esc(scheduleText()).c_str());
   r->print("<form class='f' action='/timesave' method='post'>");
   r->printf("<label><input type='checkbox' name='enabled' value='1'%s> Switch DMX by schedule</label>",

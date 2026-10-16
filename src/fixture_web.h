@@ -17,6 +17,9 @@ String arg(AsyncWebServerRequest* r, const char* name);
 AsyncResponseStream* pageBegin(AsyncWebServerRequest* req, const String& title, const char* extraHead = nullptr);
 void pageEnd(AsyncWebServerRequest* req, AsyncResponseStream* r);
 void sendMessage(AsyncWebServerRequest* req, int code, const String& title, const String& msg);
+// Back arrow and path from Home to this page: {label, url}, the last entry is the page itself;
+// an entry without url is shown as plain text. The arrow leads to the nearest linked entry before it.
+void crumbs(AsyncResponseStream* r, const std::vector<std::pair<String, String>>& path);
 // Message page that moves on to `next` after `seconds` (used while the link carries a change).
 // waitBox != 0: wait until that box confirmed all pending commands, then `seconds` more.
 void sendProgress(AsyncWebServerRequest* req, const String& title, const String& msg, const String& next, int seconds,

@@ -382,6 +382,40 @@ static void clearMarks() {
   touched = false;
 }
 
+static int currentIndex();
+
+void cuesClearChannels(uint16_t from, uint16_t to) {
+  if (from < 1) from = 1;
+  if (to > DMX_UNIVERSE_SIZE) to = DMX_UNIVERSE_SIZE;
+  if (from > to) return;
+  CLock l;
+  uint8_t state[513];
+  std::vector<PresetRef> refs;
+  computeState(currentIndex(), state, refs);
+  portENTER_CRITICAL(&dmxDataMux);
+  for (uint16_t d = from; d <= to; d++) {
+    if (!pb.fading) data[d] = state[d];  // during a fade the unmarked channel follows the fade again
+    marks[(d - 1) >> 3] &= ~(1 << ((d - 1) & 7));
+  }
+  portEXIT_CRITICAL(&dmxDataMux);
+  marksVer++;
+  // the cue's preset is active again once no channel of its fixture group is changed by hand
+  std::vector<PresetRef> active = presetRefs();
+  bool changed = false;
+  for (const PresetRef& r : refs) {
+    bool have = false;
+    for (const PresetRef& x : active) have |= x.fixtureId == r.fixtureId && x.group == r.group;
+    if (have) continue;
+    bool touchedGroup = false;
+    for (uint16_t d = 1; d <= DMX_UNIVERSE_SIZE && !touchedGroup; d++)
+      touchedGroup = chFix[d] == r.fixtureId && chGroup[d] == r.group && markedRaw(d);
+    if (touchedGroup) continue;
+    active.push_back(r);
+    changed = true;
+  }
+  if (changed) presetsSetRefs(active);
+}
+
 // Moves the executor to cue index idx of the active sequence (-1 = no cue: all 0).
 static void goTo(int idx, uint8_t move) {
   SeqMeta* s = findSeq(pb.seq);

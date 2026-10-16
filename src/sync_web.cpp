@@ -238,6 +238,7 @@ static void handleRemoteFixture(AsyncWebServerRequest* req) {
   const RemoteFixture* f;
   if (!loadRemote(req, box, f)) return req->redirect("/");
   AsyncResponseStream* r = pageBegin(req, f->name, faderHead().c_str());
+  crumbs(r, {{box.peer.name, ""}, {f->name, ""}});
   renderMiniPlayback(r);
   r->printf("<div class='titlebar'><h1>%s</h1><span class='row'><a class='btn' href='/fixture/edit?box=%u&id=%u'>Edit</a>"
             "</span></div>", esc(f->name).c_str(), box.peer.id, f->id);
@@ -262,6 +263,7 @@ static void handleRemoteFixture(AsyncWebServerRequest* req) {
   faderTabs(r, present);
   FaderGrid grid;
   grid.setUrl = "/api/remote/set?" + q;
+  grid.clearUrl = "/api/remote/clear?" + q;
   grid.getUrl = "/api/remote/values?" + q;
   grid.presetUrl = "/api/remote/preset?" + q;
   grid.pollMs = 1000;
@@ -329,6 +331,20 @@ static void handleRemoteSetApi(AsyncWebServerRequest* req) {
   req->send(200, "text/plain", "ok");
 }
 
+static void handleRemoteClearApi(AsyncWebServerRequest* req) {
+  RemoteBox box;
+  const RemoteFixture* f;
+  if (!loadRemote(req, box, f)) return req->send(400, "text/plain", "bad request");
+  int ch = arg(req, "ch").toInt();
+  if (ch < 0 || ch >= f->count) return req->send(400, "text/plain", "bad channel");
+  if (!box.peer.online()) return req->send(409, "text/plain", "offline");
+  uint16_t dmx = f->address + ch;
+  int16_t fine = ch < (int)f->fine.size() ? f->fine[ch] : -1;
+  uint16_t fineDmx = fine >= 0 ? f->address + fine : dmx;
+  syncClearRemote(box.peer.id, min(dmx, fineDmx), max(dmx, fineDmx));
+  req->send(200, "text/plain", "ok");
+}
+
 static void handleRemoteChannel(AsyncWebServerRequest* req) {
   RemoteBox box;
   const RemoteFixture* f;
@@ -352,8 +368,8 @@ static void handleRemoteChannel(AsyncWebServerRequest* req) {
 
   String name = ch < (int)f->channelNames.size() ? f->channelNames[ch] : "Ch " + String(ch + 1);
   AsyncResponseStream* r = pageBegin(req, name, pend >= 0 ? "<meta http-equiv='refresh' content='1'>" : nullptr);
-  r->printf("<p class='meta'><a href='/remote/fixture?box=%u&id=%u'>%s</a> · %s · <span class='mono'>DMX %u</span></p>",
-            box.peer.id, f->id, esc(f->name).c_str(), esc(box.peer.name).c_str(), dmx);
+  crumbs(r, {{box.peer.name, ""}, {f->name, "/remote/fixture?box=" + String(box.peer.id) + "&id=" + String(f->id)}, {name, ""}});
+  r->printf("<p class='meta mono'>DMX %u</p>", dmx);
   r->printf("<h1>%s</h1><div class='big'>%s</div>", esc(name).c_str(),
             box.haveValues ? String(box.values[dmx]).c_str() : "?");
   if (pend >= 0) r->printf("<p class='meta'><span class='spin sm'></span> sending %d…</p>", pend);
@@ -403,5 +419,6 @@ void registerSyncRoutes(AsyncWebServer& server) {
   server.on("/remote/channel", HTTP_GET, handleRemoteChannel);
   server.on("/api/remote/values", HTTP_GET, handleRemoteValuesApi);
   server.on("/api/remote/set", HTTP_ANY, handleRemoteSetApi);
+  server.on("/api/remote/clear", HTTP_POST, handleRemoteClearApi);
 }
 #endif

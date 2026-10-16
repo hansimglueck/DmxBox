@@ -9,11 +9,13 @@
 //   getUrl    -> {"v":[channel values], "p":[pending flags], "r":{"<group>":<presetId>}, "m":[changed channels]}
 //   setUrl    + "&ch=<channel>&v=<value>"            (16-bit value for coarse/fine pairs)
 //   presetUrl + "&op=recall|store|create|rename|delete&g=<group>&p=<id>&name=<name>"
+//   clearUrl  + "&ch=<channel>"                       (back to the cue value, removes the mark)
 String faderHead();  // stylesheet link for pages with a fader grid
 void registerFaderAssets(AsyncWebServer& server);
 
 struct FaderGrid {
   String setUrl, getUrl, presetUrl;
+  String clearUrl;  // + "&ch=<channel>": back to the cue value
   uint32_t pollMs = 1500;
   uint32_t reloadDelayMs = 0;  // remote boxes need time until the change comes back over the link
   String valuesJson;           // initial channel values (index = channel)

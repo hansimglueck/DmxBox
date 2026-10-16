@@ -55,7 +55,7 @@ static const uint32_t DEF_RECONCILE_MS = 30000;
 // command ops beyond the preset ops (PresetOp, 1..5)
 // cue ops reuse the command fields: fixtureId = sequence, presetId = cue, group = insert / mode,
 // address = move
-enum : uint8_t { CMD_FIXTURE_SAVE = 10, CMD_FIXTURE_DELETE = 11, CMD_CUE_STORE = 20, CMD_TRANSPORT = 21, CMD_FW_UPDATE = 30 };
+enum : uint8_t { CMD_FIXTURE_SAVE = 10, CMD_FIXTURE_DELETE = 11, CMD_CUE_STORE = 20, CMD_TRANSPORT = 21, CMD_CLEAR = 22, CMD_FW_UPDATE = 30 };
 static const uint32_t DEF_PUSH_RETRY_MS = 5000;
 static const uint8_t DEF_PUSH_MAX_ATTEMPTS = 3;
 static const uint32_t STORE_SHOW_MS = 60000;
@@ -359,6 +359,17 @@ void syncSetRemote(uint16_t box, uint16_t addr, uint8_t value) {
 }
 
 void syncPing() { pingRequested = true; }
+
+void syncClearRemote(uint16_t box, uint16_t dmxFrom, uint16_t dmxTo) {
+  Lock l;
+  PendingCmd c;
+  c.box = box;
+  c.nonce = nextNonce++;
+  c.op = CMD_CLEAR;
+  c.address = dmxFrom;
+  c.count = dmxTo;
+  pendingCmds.push_back(c);
+}
 
 void syncFirmwareUpdate(uint16_t box) {
   Lock l;
@@ -1235,6 +1246,9 @@ static void handlePacket(const uint8_t* buf, size_t len, float rssi, float snr) 
             cuesApplyTransport(t);
             break;
           }
+          case CMD_CLEAR:  // address .. count = DMX range
+            cuesClearChannels(address, count);
+            break;
           case CMD_FW_UPDATE:
             err = firmwareInstall();
             break;
@@ -1286,6 +1300,16 @@ static void handlePacket(const uint8_t* buf, size_t len, float rssi, float snr) 
         if (c.box != h.src || c.nonce != nonce) continue;
         cueOp = c.op == CMD_CUE_STORE || c.op == CMD_TRANSPORT;
         if (c.op == CMD_CUE_STORE) storeResult(c.box, ok, msg.toInt());
+        // confirmed clear: drop the marks right away instead of waiting for that box's next PT_MARKS
+        if (c.op == CMD_CLEAR && ok) {
+          for (uint16_t d = max<uint16_t>(c.address, 1); d <= c.count && d <= 512; d++) {
+            uint8_t bit = 1 << ((d - 1) & 7);
+            if (b.box.marks[(d - 1) >> 3] & bit) {
+              b.box.marks[(d - 1) >> 3] &= ~bit;
+              if (b.box.markCount) b.box.markCount--;
+            }
+          }
+        }
       }
       pendingCmds.erase(std::remove_if(pendingCmds.begin(), pendingCmds.end(),
                                        [&](const PendingCmd& c) { return c.box == h.src && c.nonce == nonce; }),

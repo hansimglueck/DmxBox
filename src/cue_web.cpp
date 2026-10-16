@@ -297,6 +297,7 @@ static void handleShowPage(AsyncWebServerRequest* req) {
   uint16_t startup = cuesStartup();
 
   AsyncResponseStream* r = pageBegin(req, "Show");
+  crumbs(r, {{"Show", ""}});
   r->print("<h1>Show</h1><p class='help'>Sequences and their cues are shared by all linked boxes. Each box stores its "
            "own channels of a cue.</p><h2>Sequences</h2><div class='panel'><table>");
   if (seqs.empty()) r->print("<tr><td class='muted'>No sequence yet. Store a cue on the home page to start one.</td></tr>");
