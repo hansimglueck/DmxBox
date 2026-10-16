@@ -238,9 +238,9 @@ static void handleRemoteFixture(AsyncWebServerRequest* req) {
   const RemoteFixture* f;
   if (!loadRemote(req, box, f)) return req->redirect("/");
   AsyncResponseStream* r = pageBegin(req, f->name, faderHead().c_str());
+  renderMiniPlayback(r);
   r->printf("<div class='titlebar'><h1>%s</h1><span class='row'><a class='btn' href='/fixture/edit?box=%u&id=%u'>Edit</a>"
             "</span></div>", esc(f->name).c_str(), box.peer.id, f->id);
-  renderMiniPlayback(r);
   if (!box.haveValues) r->print("<p class='warn meta'>Values not received yet.</p>");
   r->printf("<p class='err meta boxoffmsg'>%s is offline, changes are not transmitted.</p>", esc(box.peer.name).c_str());
   if (!box.peer.online()) r->print("<script>document.body.classList.add('boxoff')</script>");

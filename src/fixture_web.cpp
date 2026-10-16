@@ -51,25 +51,37 @@ a.panel:hover{border-color:var(--accent)}
  box-shadow:0 1px 3px rgba(0,0,0,.4)}
 .tile:hover{border-color:var(--accent)}
 div.tile{cursor:pointer}
-.tile .name{display:block;font-weight:600;font-size:16px;padding:10px 12px 2px;word-break:break-word;color:var(--text)}
-.tile .meta{padding:0 12px 9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile .name{display:block;font-weight:600;font-size:16px;padding:7px 10px 0;word-break:break-word;color:var(--text)}
+.tile .meta{padding:0 10px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tile .meta.warn{padding-top:0;margin-top:-6px}
-.chips{display:flex;flex-wrap:wrap;gap:6px;padding:9px 12px 11px;border-top:1px solid #353a43;background:#191c21}
-.chip{display:flex;flex-direction:column;min-width:64px;border:1px solid var(--line);border-radius:5px;padding:5px 7px;
+.chips{display:flex;gap:4px;padding:6px 8px 8px;border-top:1px solid #353a43;background:#191c21}
+.chip{display:flex;flex-direction:column;flex:1 1 0;min-width:0;border:1px solid var(--line);border-radius:5px;padding:4px 6px;
  font-size:12px;color:var(--muted);background:#0d0f12;line-height:1.3}
-.chip .cl{display:flex;align-items:center;gap:5px}
-.chip .cv{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--muted);white-space:nowrap}
+.chip .cl{display:flex;align-items:center;gap:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chip .cv{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chip.none{border-style:dashed;border-color:#262a31;background:transparent}
+.chip.hid,.chips.hid{display:none}
 .chip.on{border-color:var(--accent);color:var(--text)}
 .chip.on .cv{color:var(--accent)}
 .chip:hover{border-color:var(--accent)}
 .sw{display:inline-block;width:11px;height:11px;border-radius:2px;border:1px solid #555}
 .lv{display:block;height:4px;background:var(--line);border-radius:2px;margin-top:4px;overflow:hidden}
 .lv i{display:block;height:100%;background:linear-gradient(90deg,#4a4a4a,#fff)}
-#connp,#schedp{background:transparent;padding:8px 12px;font-size:14px}
+.sbar{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.sbar a{flex:1 1 auto;display:flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:6px;padding:7px 12px;
+ font-size:14px;color:var(--text)}
+.sbar a:hover{border-color:var(--accent)}
+.sbar svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;flex:none}
+#schedp{flex:0 1 auto;color:var(--muted)}
+.gfil{display:flex;gap:3px}
+.gfil button{width:26px;padding:3px 0;font-size:12px;font-family:ui-monospace,Menlo,monospace;background:transparent;color:var(--muted);
+ border:1px solid var(--line);border-radius:4px;cursor:pointer}
+.gfil button.on{border-color:var(--accent);color:var(--accent)}
 .tile.new{background:transparent;box-shadow:none;min-height:84px}
 .tile.off{opacity:.45}
 .tile.new{display:flex;align-items:center;justify-content:center;border-style:dashed;color:var(--muted);padding:12px}
-.tiles.home{margin-top:8px}
+.tiles.home{margin-top:8px;grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr))}
+.chip .gs{display:none}.chips.narrow .gn{display:none}.chips.narrow .gs{display:inline}
 @media(max-width:600px){.tiles{grid-template-columns:1fr}}
 form.f label{display:block;margin:12px 0 4px;color:var(--muted);font-size:13px}
 input,select,textarea{font-size:15px;padding:8px;background:#0d0f12;color:var(--text);border:1px solid var(--line);border-radius:4px;width:100%;font-family:inherit}
@@ -97,12 +109,12 @@ body.lost header,body.lost main,body.lost footer{opacity:.3;filter:grayscale(1);
 .btn svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round;vertical-align:-3px}
 .btn:disabled{opacity:.35;cursor:default}
 .btn.sm{padding:5px 8px;font-size:13px}
-.play{padding:12px 14px}
+.play{padding:12px 14px;border-left:3px solid var(--accent)}
 .prow{display:flex;gap:10px;align-items:center;justify-content:space-between;margin:2px 0 6px}
 .prow select{flex:1}
 #pseq{border:none;background:transparent;font-size:22px;font-weight:600;padding:2px 0;color:var(--text);cursor:pointer;min-width:0}
 #pplay{display:flex;align-items:center;gap:4px;padding:8px 14px}
-.mplay{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px;margin:10px 0 4px}
+.mplay{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:6px;padding:6px 8px;margin:12px 0 4px}
 .mline{display:flex;justify-content:space-between;gap:8px;font-size:14px;margin:0 2px 6px}
 .mcue{white-space:pre;overflow:hidden;text-overflow:ellipsis}
 .mcount{font-size:13px;white-space:nowrap}
@@ -114,6 +126,7 @@ body.lost header,body.lost main,body.lost footer{opacity:.3;filter:grayscale(1);
 .krow a{text-transform:none;letter-spacing:0;font-size:14px}
 .ktitle{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:4px}
 h2.ktitle{margin:22px 0 0;font-weight:500}
+h2.krow{align-items:center}
 .prow>span{flex:1}
 .pcue{font-size:15px;white-space:pre;color:var(--muted)}
 .pbar{height:4px;background:var(--line);border-radius:2px;overflow:hidden;margin:4px 0 10px}
@@ -322,12 +335,36 @@ function render(s){
   clearTimeout(window._st);window._st=setTimeout(poll,spin?1000:5000);
 }
 document.addEventListener('click',e=>{const t=e.target.closest('.tile[data-href]');if(t&&!e.target.closest('a'))location=t.dataset.href});
+// group filter (remembered per browser) and aligned columns: a fixture without a group gets an empty
+// placeholder, so that the same group sits at the same place on every tile, like a fixture sheet
+let hidden=[];try{hidden=JSON.parse(localStorage.getItem('hideGroups')||'[]')}catch(e){}
+const GF=document.getElementById('gfil');
+function sheet(){
+  const chips=[...document.querySelectorAll('.tiles .chip:not(.none)')];
+  const present=[...new Set(chips.map(c=>+c.dataset.g))].sort((a,b)=>a-b);
+  GF.querySelectorAll('button').forEach(b=>{const g=+b.dataset.g;b.classList.toggle('on',!hidden.includes(g));b.style.display=present.includes(g)?'':'none'});
+  const shown=present.filter(g=>!hidden.includes(g));
+  document.querySelectorAll('.tiles .chips').forEach(box=>{
+    box.querySelectorAll('.chip.none').forEach(c=>c.remove());
+    const have={};box.querySelectorAll('.chip').forEach(c=>{have[c.dataset.g]=c;c.classList.toggle('hid',hidden.includes(+c.dataset.g))});
+    let any=false;
+    shown.forEach(g=>{if(have[g]){any=true;box.appendChild(have[g])}else{const p=document.createElement('span');p.className='chip none';p.dataset.g=g;box.appendChild(p)}});
+    box.classList.toggle('hid',!any);
+    box.classList.toggle('narrow',box.clientWidth/Math.max(1,shown.length)<75);  // only the letter
+  });
+}
+addEventListener('resize',sheet);
+GF.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;const g=+b.dataset.g;
+  hidden=hidden.includes(g)?hidden.filter(x=>x!==g):hidden.concat(g);
+  try{localStorage.setItem('hideGroups',JSON.stringify(hidden))}catch(e){}
+  sheet()});
+sheet();
 function poll(){fetch('/api/status',{cache:'no-store'}).then(r=>r.json()).then(render).catch(()=>{clearTimeout(window._st);window._st=setTimeout(poll,5000)})}
 poll();
 // keep tile values current: re-render the tile grid from the server every 5 s
 setInterval(()=>{if(document.hidden)return;fetch('/',{cache:'no-store'}).then(r=>r.text()).then(t=>{
   const n=new DOMParser().parseFromString(t,'text/html').querySelector('.tiles');
-  if(n)document.querySelector('.tiles').innerHTML=n.innerHTML}).catch(()=>{})},5000);
+  if(n){document.querySelector('.tiles').innerHTML=n.innerHTML;sheet()}}).catch(()=>{})},5000);
 })();
 </script>)JS";
 
@@ -410,11 +447,11 @@ void fixtureTile(AsyncResponseStream* r, const String& href, const String& name,
       }
       String sw = g.group == GROUP_COLOR ? groupSwatch(g.channels) : String("");
       if (sw.isEmpty() && g.group == GROUP_COLOR && !g.preset.isEmpty()) sw = colorFromName(g.preset);
-      r->printf("<a class='chip%s' href='%s#g%u'><span class='cl'>", (nonDefault || !g.preset.isEmpty()) ? " on" : "",
-                esc(href).c_str(), g.group);
+      r->printf("<a class='chip%s' data-g='%u' href='%s#g%u'><span class='cl'>", (nonDefault || !g.preset.isEmpty()) ? " on" : "",
+                g.group, esc(href).c_str(), g.group);
       if (!sw.isEmpty()) r->printf("<i class='sw' style='background:%s'></i>", sw.c_str());
-      r->printf("%s</span><span class='cv'>%s</span>", GROUP_NAMES[g.group],
-                esc(g.preset.isEmpty() ? vals : g.preset).c_str());
+      r->printf("<span class='gn'>%s</span><span class='gs'>%c</span></span><span class='cv'>%s</span>", GROUP_NAMES[g.group],
+                GROUP_NAMES[g.group][0], esc(g.preset.isEmpty() ? vals : g.preset).c_str());
       if (g.group == GROUP_DIMMER && !g.channels.empty()) {
         r->printf("<span class='lv'><i style='width:%d%%'></i></span>", g.channels[0].value * 100 / 255);
       }
@@ -450,12 +487,17 @@ static void localTile(AsyncResponseStream* r, const Fixture& f) {
 
 void sendFixturesPage(AsyncWebServerRequest* request) {
   AsyncResponseStream* r = pageBegin(request, "Fixtures");
-  r->print("<a class='panel' id='connp' href='/connectivity'><div class='ktitle'>Connectivity</div>"
-           "<div class='status' id='conn'><span class='dim'>…</span></div></a>");
-  r->print("<a class='panel' id='schedp' href='/timesetup'><div class='ktitle'>Timer</div><div id='sched'>…</div></a>");
+  // status strip: connectivity and timer are information, the playback below is the control
+  r->print("<div class='sbar'><a id='connp' href='/connectivity' title='Connectivity'>"
+           "<span class='status' id='conn'><span class='dim'>…</span></span></a>"
+           "<a id='schedp' href='/timesetup' title='Timer'><svg viewBox='0 0 24 24'><rect x='3' y='5' width='18' height='16' rx='2'/>"
+           "<path d='M3 10h18M8 3v4M16 3v4'/></svg><span id='sched'>…</span></a></div>");
   renderPlaybackPanel(r);
   r->print("<div class='panel meta' id='note' style='display:none'></div>");
-  r->print("<h2 class='ktitle'>Fixtures</h2><div class='tiles home'>");
+  // group filter: letters in group order (Control is the second C)
+  r->print("<h2 class='ktitle krow'><span>Fixtures</span><span class='gfil' id='gfil'>");
+  for (uint8_t g = 0; g < GROUP_COUNT; g++) r->printf("<button type='button' data-g='%u' title='%s'>%c</button>", g, GROUP_NAMES[g], GROUP_NAMES[g][0]);
+  r->print("</span></h2><div class='tiles home'>");
   for (const Fixture& f : fixtureList) localTile(r, f);
 #ifdef HAS_LORA
   renderRemoteTiles(r);
@@ -743,10 +785,10 @@ static void handleFixturePage(AsyncWebServerRequest* req) {
   if (!fp) return req->redirect("/");
   const Fixture& f = *fp;
   AsyncResponseStream* r = pageBegin(req, f.name, faderHead().c_str());
+  renderMiniPlayback(r);
   r->printf("<div class='titlebar'><h1>%s</h1><span class='row'>", esc(f.name).c_str());
   if (f.defId == 0) r->printf("<a class='btn' href='/fixturenames?id=%u'>Channel names</a>", f.id);
   r->printf("<a class='btn' href='/fixture/edit?id=%u'>Edit</a></span></div>", f.id);
-  renderMiniPlayback(r);
   String id = String(f.id);
   std::vector<uint8_t> groups = fixtureGroups(f);
   std::vector<uint8_t> present = groupsPresent(groups);
