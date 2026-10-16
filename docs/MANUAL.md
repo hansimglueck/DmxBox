@@ -232,7 +232,23 @@ ausgeschaltet, ist DMX immer an.
 - **Station:** Die Box ist mit einem WLAN verbunden. Sie ist unter ihrer IP-Adresse oder
   `http://<name>.local` erreichbar.
 - **Access point:** Die Box hat ein eigenes WLAN (`http://192.168.4.1`). Das passiert, wenn kein Netz
-  gespeichert ist, das gespeicherte Netz nicht erreichbar ist oder die Verbindung abreißt.
+  gespeichert ist, das gespeicherte Netz beim Start nicht erreichbar ist oder die Verbindung länger
+  abreißt.
+
+**Wenn die Verbindung abreißt:**
+- Kurze Aussetzer überbrückt die Box: Sie bleibt bis zu 75 s im Stationsmodus und verbindet sich von
+  selbst neu.
+- Erst danach öffnet sie ihren Access Point. Das gespeicherte Netz versucht sie weiter, einmal pro
+  Minute. Ist es wieder da, schließt sie den Access Point und ist wieder unter ihrer alten Adresse
+  erreichbar.
+- Ist gerade jemand mit dem Access Point verbunden, wartet die Box mit dem Versuch. Ein Wechsel ins
+  WLAN würde diese Verbindung sonst trennen.
+
+Das hilft auch, wenn der Router langsamer startet als die Box.
+
+**Diagnose:** Die Tabelle zeigt unter *Signal* den Durchschnitt und das Minimum der letzten 10 Minuten,
+unter *Connection losses* die Zahl der Abbrüche seit dem Start mit Zeitpunkt und Grund. Viele Abbrüche
+bei schwachem Signal (unter etwa −80 dBm) deuten auf Antenne oder Abstand zum Router hin.
 
 Mit *Scan networks* oder der Eingabe von Netzname und Passwort verbindet sich die Box mit einem Netz und
 startet neu.

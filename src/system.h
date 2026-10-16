@@ -14,6 +14,18 @@ extern uint8_t dmxWeekdayEndMinute[7];
 extern volatile bool restartRequested;
 extern volatile uint16_t loopFps;  // main loop iterations per second (DMX frames)  // handled in loop() so that the HTTP response gets out first
 
+struct WifiStats {
+  uint32_t disconnects = 0;       // station connection losses since boot
+  uint8_t lastReason = 0;         // wifi_err_reason_t of the last one
+  uint32_t lastDisconnectMs = 0;  // 0 = none
+  uint32_t apSinceMs = 0;         // in the AP fallback since (0 = not in AP mode)
+  uint32_t retries = 0;           // attempts to get back into the saved network
+  int8_t rssiMin = 0, rssiAvg = 0;  // over the last 10 minutes while connected
+  uint8_t rssiSamples = 0;
+};
+WifiStats wifiStats();
+const char* wifiReasonText(uint8_t reason);
+
 bool isDMXActiveTime();
 // Local time, false while the clock is not set. Unlike getLocalTime(&t, 0) it never fails at random.
 bool localTimeNow(struct tm& t);

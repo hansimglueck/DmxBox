@@ -66,7 +66,19 @@ const char* password = WIFI_PASSWORD;
 char savedSSID[64] = {0};
 char savedPassword[64] = {0};
 bool apModeActive = false;
-unsigned long lastWiFiCheck = 0;
+
+// WiFi supervision: a lost station connection gets WIFI_GRACE_MS to come back by itself before the box
+// opens its access point; in AP mode the saved network is retried every WIFI_RETRY_MS (only while nobody
+// uses the AP: connecting moves the AP to the router's channel, which drops its clients).
+static const uint32_t WIFI_GRACE_MS = 75000;
+static const uint32_t WIFI_RETRY_MS = 60000;
+static const uint32_t WIFI_STABLE_MS = 10000;  // connected this long before the AP is closed again
+static uint32_t wifiLostSinceMs = 0;
+static uint32_t wifiRetryAtMs = 0;
+static uint32_t wifiBackSinceMs = 0;
+static WifiStats wstats;
+static int8_t rssiSamples[60];  // one per 10 s while connected: the last 10 minutes
+static uint8_t rssiCount = 0, rssiPos = 0;
 
 const byte DNS_PORT = 53;
 DNSServer dnsServer;
@@ -600,8 +612,16 @@ void loadWiFiConfig(char* ssid, char* password) {
 void switchToAPMode() {
   Serial.println("Starting AP mode...");
   apModeActive = true;
+  wstats.apSinceMs = millis() | 1;
+  wifiRetryAtMs = millis() + WIFI_RETRY_MS;
+  wifiBackSinceMs = 0;
 
-  WiFi.mode(WIFI_AP);
+  // with a saved network the station stays on to retry it; reconnects are paced by wifiLoop(), not by
+  // the driver (each attempt scans the channels and disturbs the access point)
+  bool retry = strlen(savedSSID) > 0;
+  WiFi.setAutoReconnect(false);
+  if (retry) WiFi.disconnect();
+  WiFi.mode(retry ? WIFI_AP_STA : WIFI_AP);
   delay(100);
 
   WiFi.softAP(ssid, password);
@@ -612,6 +632,84 @@ void switchToAPMode() {
   dnsServer.stop();
   dnsServer.start(DNS_PORT, "*", apIP);
 }
+
+// Back in the saved network: close the access point.
+static void leaveAPMode() {
+  Serial.printf("WiFi: back in %s (%s), closing the access point\n", savedSSID, WiFi.localIP().toString().c_str());
+  dnsServer.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  apModeActive = false;
+  wstats.apSinceMs = 0;
+  wifiLostSinceMs = 0;
+  initTime();
+}
+
+static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  // only a connection that existed counts as lost (not failed attempts at boot or from the AP fallback)
+  static bool hadIp = false;
+  if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) hadIp = true;
+  if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED && hadIp) {
+    hadIp = false;
+    wstats.disconnects++;
+    wstats.lastReason = info.wifi_sta_disconnected.reason;
+    wstats.lastDisconnectMs = millis() | 1;
+  }
+}
+
+static void wifiLoop() {
+  uint32_t now = millis();
+  bool connected = WiFi.status() == WL_CONNECTED;
+  static uint32_t lastSampleMs = 0;
+  if (connected && now - lastSampleMs >= 10000) {
+    lastSampleMs = now;
+    rssiSamples[rssiPos] = WiFi.RSSI();
+    rssiPos = (rssiPos + 1) % 60;
+    if (rssiCount < 60) rssiCount++;
+  }
+  if (!apModeActive) {
+    if (connected) {
+      wifiLostSinceMs = 0;
+    } else if (!wifiLostSinceMs) {
+      wifiLostSinceMs = now | 1;
+      Serial.println("WiFi: connection lost, waiting for it to come back");
+    } else if (now - wifiLostSinceMs > WIFI_GRACE_MS) {
+      Serial.println("WiFi: still lost, switching to AP mode");
+      switchToAPMode();
+    }
+    return;
+  }
+  if (!strlen(savedSSID)) return;
+  if (connected) {
+    if (!wifiBackSinceMs) wifiBackSinceMs = now | 1;
+    if (now - wifiBackSinceMs > WIFI_STABLE_MS && WiFi.softAPgetStationNum() == 0) leaveAPMode();
+    return;
+  }
+  wifiBackSinceMs = 0;
+  if ((int32_t)(now - wifiRetryAtMs) >= 0) {
+    wifiRetryAtMs = now + WIFI_RETRY_MS;
+    if (WiFi.softAPgetStationNum() > 0) return;  // somebody uses the AP: do not move its channel
+    wstats.retries++;
+    Serial.printf("WiFi: retrying %s\n", savedSSID);
+    WiFi.begin(savedSSID, savedPassword);
+  }
+}
+
+WifiStats wifiStats() {
+  WifiStats s = wstats;
+  int sum = 0;
+  s.rssiMin = 0;
+  for (uint8_t i = 0; i < rssiCount; i++) {
+    sum += rssiSamples[i];
+    if (rssiSamples[i] < s.rssiMin) s.rssiMin = rssiSamples[i];
+  }
+  s.rssiAvg = rssiCount ? sum / rssiCount : 0;
+  s.rssiSamples = rssiCount;
+  return s;
+}
+
+const char* wifiReasonText(uint8_t reason) { return WiFi.disconnectReasonName((wifi_err_reason_t)reason); }
 
 void setup(){
   // initialize digital pin LED_BUILTIN as an output.
@@ -657,6 +755,7 @@ void setup(){
   
   // Load WiFi config from EEPROM
   loadWiFiConfig(savedSSID, savedPassword);
+  WiFi.onEvent(onWiFiEvent);
 
   bool wifiConnected = false;
   if (strlen(savedSSID) > 0) {
@@ -784,14 +883,7 @@ void loop(){
     initTime();
   }
 
-  // STA-Verbindung überwachen, bei Verlust → AP
-  if (!apModeActive && millis() - lastWiFiCheck > 30000) {
-    lastWiFiCheck = millis();
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("WiFi lost, switching to AP mode");
-      switchToAPMode();
-    }
-  }
+  wifiLoop();
   
   static unsigned long lastDisplayUpdate = 0;
   static unsigned long framesAtLastDisplay = 0;

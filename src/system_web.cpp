@@ -395,12 +395,27 @@ static void handleConnectivity(AsyncWebServerRequest* req) {
   if (sta) {
     r->printf("<tr><th>Network</th><td>%s</td></tr>", esc(WiFi.SSID()).c_str());
     r->printf("<tr><th>IP address</th><td class='mono'>%s</td></tr>", WiFi.localIP().toString().c_str());
-    r->printf("<tr><th>Signal</th><td class='mono'>%d dBm</td></tr>", WiFi.RSSI());
+    WifiStats ws = wifiStats();
+    r->printf("<tr><th>Signal</th><td class='mono'>%d dBm", WiFi.RSSI());
+    if (ws.rssiSamples > 1) r->printf(" <span class='meta'>· 10 min: avg %d, min %d</span>", ws.rssiAvg, ws.rssiMin);
+    r->print("</td></tr>");
   } else {
     r->printf("<tr><th>Network</th><td>%s</td></tr>", esc(String(ssid)).c_str());
     r->printf("<tr><th>IP address</th><td class='mono'>%s</td></tr>", WiFi.softAPIP().toString().c_str());
     r->printf("<tr><th>Clients</th><td class='mono'>%d</td></tr>", WiFi.softAPgetStationNum());
-    if (strlen(savedSSID)) r->printf("<tr><th>Saved network</th><td>%s (not reachable)</td></tr>", esc(String(savedSSID)).c_str());
+    if (strlen(savedSSID)) {
+      WifiStats ws = wifiStats();
+      r->printf("<tr><th>Saved network</th><td>%s <span class='meta'>· not reachable, retried every minute while no one "
+                "is connected to the access point (%lu attempts, access point for %lu min)</span></td></tr>",
+                esc(String(savedSSID)).c_str(), (unsigned long)ws.retries, ws.apSinceMs ? (millis() - ws.apSinceMs) / 60000 : 0UL);
+    }
+  }
+  {
+    WifiStats ws = wifiStats();
+    r->printf("<tr><th>Connection losses</th><td>%lu", (unsigned long)ws.disconnects);
+    if (ws.lastDisconnectMs)
+      r->printf(" <span class='meta'>· last %s, %s</span>", agoText(ws.lastDisconnectMs).c_str(), wifiReasonText(ws.lastReason));
+    r->print("</td></tr>");
   }
   r->printf("<tr><th>Hostname</th><td class='mono'>%s.local</td></tr>", esc(String(ssid)).c_str());
   r->printf("<tr><th>Last restart</th><td>%s, %lu min ago</td></tr>", resetReasonText(), millis() / 60000);
