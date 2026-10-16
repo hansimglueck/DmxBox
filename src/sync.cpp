@@ -6,6 +6,7 @@
 #include "cues.h"
 #include "system.h"
 #include "firmware.h"
+#include <WiFi.h>
 #include <esp_rom_crc.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
@@ -359,6 +360,11 @@ void syncSetRemote(uint16_t box, uint16_t addr, uint8_t value) {
 }
 
 void syncPing() { pingRequested = true; }
+
+uint8_t syncOwnWifiState() {
+  if (!apModeActive && WiFi.status() == WL_CONNECTED) return WIFI_STATION;
+  return apModeActive ? WIFI_OWN_AP : WIFI_NONE;
+}
 
 void syncClearRemote(uint16_t box, uint16_t dmxFrom, uint16_t dmxTo) {
   Lock l;
@@ -1079,6 +1085,12 @@ static void handlePacket(const uint8_t* buf, size_t len, float rssi, float snr) 
           peer.fwKnown = true;
           peer.fwCode = fwCode;
           peer.fwFlags = fwFlags;
+          uint8_t ws;
+          int8_t wr;
+          if (get(p, end, ws) && get(p, end, wr)) {
+            peer.wifiState = ws;
+            peer.wifiRssi = wr;
+          }
         }
       }
       if (!wasOnline) {
@@ -1594,6 +1606,9 @@ static void buildBeacon() {
   put<uint16_t>(b, pi.epoch);
   put<uint32_t>(b, firmwareVersionCode());
   put<uint8_t>(b, firmwareFlags());
+  uint8_t ws = syncOwnWifiState();
+  put<uint8_t>(b, ws);
+  put<int8_t>(b, ws == WIFI_STATION ? (int8_t)WiFi.RSSI() : 0);
   queuePacket(PT_BEACON, b);
 }
 

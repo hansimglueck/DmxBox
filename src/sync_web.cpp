@@ -7,6 +7,7 @@
 #include "cue_web.h"
 #include "firmware.h"
 #include "system.h"
+#include <WiFi.h>
 #include <algorithm>
 
 static String ago(uint32_t ms) {
@@ -22,6 +23,16 @@ static String ago(uint32_t ms) {
 static bool canUpdateFirmware(const PeerInfo& p, uint32_t latestCode) {
   return p.online() && p.fwKnown && (p.fwFlags & FW_FLAG_INTERNET) && !(p.fwFlags & FW_FLAG_UPDATING) &&
          ((p.fwFlags & FW_FLAG_AVAILABLE) || latestCode > p.fwCode);
+}
+
+static String wifiCell(uint8_t state, int rssi) {
+  if (state == WIFI_STATION) {
+    const char* cls = rssi >= -67 ? "ok" : rssi >= -80 ? "warn" : "err";  // good / usable / weak
+    return "<span class='" + String(cls) + "'>" + String(rssi) + " dBm</span>";
+  }
+  if (state == WIFI_OWN_AP) return "own AP";
+  if (state == WIFI_NONE) return "<span class='err'>none</span>";
+  return "<span class='muted'>–</span>";
 }
 
 // "update available": what that box found itself, or a newer release this box knows of
@@ -55,8 +66,18 @@ void renderLoraSection(AsyncResponseStream* r) {
   std::vector<PeerInfo> peers = syncPeers();
   uint32_t latestCode = firmwareStatus().latestCode;
   int updatable = 0;
-  r->print("<div class='panel'><table><tr><th>Box</th><th>Status</th><th>Signal</th><th>Ping</th></tr>");
-  if (peers.empty()) r->print("<tr><td colspan='4' class='muted'>No other box heard yet.</td></tr>");
+  r->print("<div class='panel'><table><tr><th>Box</th><th>Status</th><th>LoRa</th><th>WiFi</th><th>Ping</th></tr>");
+  // this box first, for the complete picture
+  {
+    String host = String(ssid);
+    uint8_t ws = syncOwnWifiState();
+    r->printf("<tr><td><a href='http://%s.local/'>%s</a><br><span class='meta mono'>%04x · %u fixtures</span><br>"
+              "<span class='meta'>v%s</span></td><td class='ok'>this box</td><td class='muted'>–</td><td class='mono'>%s</td>"
+              "<td class='muted'>–</td></tr>",
+              esc(host).c_str(), esc(s.name).c_str(), syncBoxId(), (unsigned)fixtureList.size(), firmwareVersion(),
+              wifiCell(ws, ws == WIFI_STATION ? WiFi.RSSI() : 0).c_str());
+  }
+  if (peers.empty()) r->print("<tr><td colspan='5' class='muted'>No other box heard yet.</td></tr>");
   for (const PeerInfo& p : peers) {
     // the hostname follows the box name (see applyStoredNetworkName); reachable when we share a network
     String host = p.named ? networkNameFor(p.name) : String("");
@@ -73,6 +94,7 @@ void renderLoraSection(AsyncResponseStream* r) {
     }
     r->print("</td>");
     r->printf("<td class='mono'>%.0f dBm<br><span class='meta'>SNR %.1f</span></td>", p.rssi, p.snr);
+    r->printf("<td class='mono'>%s</td>", wifiCell(p.wifiState, p.wifiRssi).c_str());
     if (p.pingRttMs >= 0) r->printf("<td class='mono'>%d ms<br><span class='meta'>they: %.0f dBm</span></td></tr>", p.pingRttMs, p.theirRssi);
     else r->print("<td class='muted'>–</td></tr>");
   }

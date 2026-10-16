@@ -4,6 +4,12 @@
 #include <vector>
 #include "cues.h"
 
+// WiFi of a box as announced in its beacon
+enum : uint8_t { WIFI_UNKNOWN = 0, WIFI_STATION = 1, WIFI_OWN_AP = 2, WIFI_NONE = 3 };
+
+// WiFi of this box in the same terms.
+uint8_t syncOwnWifiState();
+
 struct PeerInfo {
   uint16_t id = 0;
   String name;
@@ -18,6 +24,8 @@ struct PeerInfo {
   bool fwKnown = false;  // false: firmware too old to report its version
   uint32_t fwCode = 0;   // see firmwareVersionCode()
   uint8_t fwFlags = 0;   // FW_FLAG_*
+  uint8_t wifiState = WIFI_UNKNOWN;
+  int8_t wifiRssi = 0;   // dBm while in a network
   bool online() const { return lastSeenMs != 0 && millis() - lastSeenMs < 35000; }  // 3 missed beacons
 };
 
