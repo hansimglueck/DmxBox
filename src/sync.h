@@ -14,6 +14,9 @@ struct PeerInfo {
   uint16_t fixVersion = 0;
   uint8_t fixCount = 0;
   uint32_t uptimeS = 0;
+  bool fwKnown = false;  // false: firmware too old to report its version
+  uint32_t fwCode = 0;   // see firmwareVersionCode()
+  uint8_t fwFlags = 0;   // FW_FLAG_*
   bool online() const { return lastSeenMs != 0 && millis() - lastSeenMs < 35000; }  // 3 missed beacons
 };
 
@@ -124,4 +127,6 @@ void syncTransport(const CueTransport& t);
 void syncCueStore(const CueStoreResult& r);
 CueStoreStatus syncCueStoreStatus();
 void syncPing();
+// Asks that box to install the newest firmware release (it needs internet itself).
+void syncFirmwareUpdate(uint16_t box);
 #endif

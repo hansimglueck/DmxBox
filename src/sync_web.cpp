@@ -5,6 +5,7 @@
 #include "fixture_web.h"
 #include "fader_ui.h"
 #include "cue_web.h"
+#include "firmware.h"
 #include <algorithm>
 
 static String ago(uint32_t ms) {
@@ -15,6 +16,21 @@ static String ago(uint32_t ms) {
 }
 
 // ---------------- connectivity: LoRa section ----------------
+
+// The box downloads the update itself, so it needs internet; "newer" is what it found or what we found.
+static bool canUpdateFirmware(const PeerInfo& p, uint32_t latestCode) {
+  return p.online() && p.fwKnown && (p.fwFlags & FW_FLAG_INTERNET) && !(p.fwFlags & FW_FLAG_UPDATING) &&
+         ((p.fwFlags & FW_FLAG_AVAILABLE) || latestCode > p.fwCode);
+}
+
+static String peerFirmwareLabel(const PeerInfo& p) {
+  if (!p.fwKnown) return "firmware unknown (older)";
+  String s = p.fwCode ? "v" + versionString(p.fwCode) : String("unreleased build");
+  if (p.fwFlags & FW_FLAG_UPDATING) s += " · <span class='warn'>updating…</span>";
+  else if (p.fwFlags & FW_FLAG_AVAILABLE) s += " · <span class='ok'>update available</span>";
+  if (!(p.fwFlags & FW_FLAG_INTERNET)) s += " · no internet";
+  return s;
+}
 
 void renderLoraSection(AsyncResponseStream* r) {
   LinkSettings s = syncSettings();
@@ -35,17 +51,31 @@ void renderLoraSection(AsyncResponseStream* r) {
   r->print("</td></tr></table></div>");
 
   std::vector<PeerInfo> peers = syncPeers();
+  uint32_t latestCode = firmwareStatus().latestCode;
+  int updatable = 0;
   r->print("<div class='panel'><table><tr><th>Box</th><th>Status</th><th>Signal</th><th>Ping</th></tr>");
   if (peers.empty()) r->print("<tr><td colspan='4' class='muted'>No other box heard yet.</td></tr>");
   for (const PeerInfo& p : peers) {
-    r->printf("<tr><td>%s<br><span class='meta mono'>%04x · %u fixtures</span></td>", esc(p.name).c_str(), p.id, p.fixCount);
-    r->printf("<td>%s<br><span class='meta'>%s ago</span></td>", p.online() ? "online" : "<span class='err'>offline</span>",
+    r->printf("<tr><td>%s<br><span class='meta mono'>%04x · %u fixtures</span><br><span class='meta'>%s</span></td>",
+              esc(p.name).c_str(), p.id, p.fixCount, peerFirmwareLabel(p).c_str());
+    r->printf("<td>%s<br><span class='meta'>%s ago</span>", p.online() ? "online" : "<span class='err'>offline</span>",
               ago(p.lastSeenMs).c_str());
+    if (canUpdateFirmware(p, latestCode)) {
+      updatable++;
+      r->printf("<form action='/link/firmware' method='post'><input type='hidden' name='box' value='%u'>"
+                "<button class='btn sm' type='submit'>Update</button></form>", p.id);
+    }
+    r->print("</td>");
     r->printf("<td class='mono'>%.0f dBm<br><span class='meta'>SNR %.1f</span></td>", p.rssi, p.snr);
     if (p.pingRttMs >= 0) r->printf("<td class='mono'>%d ms<br><span class='meta'>they: %.0f dBm</span></td></tr>", p.pingRttMs, p.theirRssi);
     else r->print("<td class='muted'>–</td></tr>");
   }
-  r->print("</table></div><div class='row'><a class='btn' href='/link/ping'>Ping all boxes</a></div>");
+  r->print("</table></div><div class='row'><a class='btn' href='/link/ping'>Ping all boxes</a>");
+  if (updatable > 1) {
+    r->printf("<form action='/link/firmware' method='post'><input type='hidden' name='box' value='0'>"
+              "<button class='btn' type='submit'>Update all (%d)</button></form>", updatable);
+  }
+  r->print("</div>");
 
   r->print("<form class='f panel' action='/link/save' method='post'>");
   r->print("<label>Link password (same on all boxes)</label><input name='password' type='password' placeholder='unchanged'>");
@@ -68,6 +98,21 @@ static void handleLinkSave(AsyncWebServerRequest* req) {
     return sendMessage(req, 200, "Saved", "LoRa will be switched on at the next restart.");
   }
   req->redirect("/connectivity#lora");
+}
+
+static void handleLinkFirmware(AsyncWebServerRequest* req) {
+  uint16_t box = arg(req, "box").toInt();
+  uint32_t latestCode = firmwareStatus().latestCode;
+  int n = 0;
+  for (const PeerInfo& p : syncPeers()) {
+    if ((box && p.id != box) || !canUpdateFirmware(p, latestCode)) continue;
+    syncFirmwareUpdate(p.id);
+    n++;
+  }
+  if (!n) return sendMessage(req, 409, "Firmware update", "No box that can be updated right now (online, with internet).");
+  sendProgress(req, "Firmware update",
+               "Update requested. The box downloads the firmware itself and restarts, this takes about a minute.",
+               "/connectivity#lora", 2, box);
 }
 
 static void handleLinkPing(AsyncWebServerRequest* req) {
@@ -352,6 +397,7 @@ void registerSyncRoutes(AsyncWebServer& server) {
   });
   server.on("/link/save", HTTP_ANY, handleLinkSave);
   server.on("/link/ping", HTTP_GET, handleLinkPing);
+  server.on("/link/firmware", HTTP_POST, handleLinkFirmware);
   server.on("/link", HTTP_GET, [](AsyncWebServerRequest* req) { req->redirect("/connectivity#lora"); });
   server.on("/remote/fixture", HTTP_GET, handleRemoteFixture);
   server.on("/remote/channel", HTTP_GET, handleRemoteChannel);

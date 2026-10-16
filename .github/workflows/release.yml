@@ -1,0 +1,68 @@
+# Builds the firmware for a version tag (v1.2.3) and publishes it as a GitHub release.
+# Boxes with HAS_FW_UPDATE read releases/latest/download/latest.json and download their
+# firmware-<env>.bin from there.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        env: [heltec-v4, esp32dev, esp32-c3-devkitm-1]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ matrix.env }}-${{ hashFiles('platformio.ini') }}
+      - run: pip install platformio
+      - run: pio run -e ${{ matrix.env }}
+      - run: cp .pio/build/${{ matrix.env }}/firmware.bin firmware-${{ matrix.env }}.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.env }}
+          path: firmware-${{ matrix.env }}.bin
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Write latest.json
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'EOF'
+          import glob, hashlib, json, os
+          tag, repo = os.environ["TAG"], os.environ["REPO"]
+          builds = {}
+          for path in sorted(glob.glob("firmware-*.bin")):
+              env = path[len("firmware-"):-len(".bin")]
+              data = open(path, "rb").read()
+              builds[env] = {
+                  "url": f"https://github.com/{repo}/releases/download/{tag}/{path}",
+                  "size": len(data),
+                  "md5": hashlib.md5(data).hexdigest(),
+              }
+          json.dump({"version": tag.lstrip("v"), "builds": builds}, open("latest.json", "w"), indent=2)
+          print(open("latest.json").read())
+          EOF
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            firmware-*.bin
+            latest.json
+          generate_release_notes: true

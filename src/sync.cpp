@@ -5,6 +5,7 @@
 #include "presets.h"
 #include "cues.h"
 #include "system.h"
+#include "firmware.h"
 #include <esp_rom_crc.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
@@ -54,7 +55,7 @@ static const uint32_t DEF_RECONCILE_MS = 30000;
 // command ops beyond the preset ops (PresetOp, 1..5)
 // cue ops reuse the command fields: fixtureId = sequence, presetId = cue, group = insert / mode,
 // address = move
-enum : uint8_t { CMD_FIXTURE_SAVE = 10, CMD_FIXTURE_DELETE = 11, CMD_CUE_STORE = 20, CMD_TRANSPORT = 21 };
+enum : uint8_t { CMD_FIXTURE_SAVE = 10, CMD_FIXTURE_DELETE = 11, CMD_CUE_STORE = 20, CMD_TRANSPORT = 21, CMD_FW_UPDATE = 30 };
 static const uint32_t DEF_PUSH_RETRY_MS = 5000;
 static const uint8_t DEF_PUSH_MAX_ATTEMPTS = 3;
 static const uint32_t STORE_SHOW_MS = 60000;
@@ -358,6 +359,15 @@ void syncSetRemote(uint16_t box, uint16_t addr, uint8_t value) {
 }
 
 void syncPing() { pingRequested = true; }
+
+void syncFirmwareUpdate(uint16_t box) {
+  Lock l;
+  PendingCmd c;
+  c.box = box;
+  c.nonce = nextNonce++;
+  c.op = CMD_FW_UPDATE;
+  pendingCmds.push_back(c);
+}
 
 void syncPresetCommand(uint16_t box, uint8_t op, uint16_t fixtureId, uint8_t group, uint16_t presetId,
                        const String& name) {
@@ -1050,6 +1060,14 @@ static void handlePacket(const uint8_t* buf, size_t len, float rssi, float snr) 
       if (get(p, end, showVer) && get(p, end, showCrc) && get(p, end, playSeq) && get(p, end, playCue) &&
           get(p, end, playMode) && get(p, end, playMs) && get(p, end, playEpoch)) {
         handleShowBeacon(h.src, showVer, showCrc, playSeq, playCue, playMode, playMs, playEpoch);
+        // firmware fields came later: boxes with older firmware end the beacon here
+        uint32_t fwCode;
+        uint8_t fwFlags;
+        if (get(p, end, fwCode) && get(p, end, fwFlags)) {
+          peer.fwKnown = true;
+          peer.fwCode = fwCode;
+          peer.fwFlags = fwFlags;
+        }
       }
       if (!wasOnline) {
         Serial.printf("Link: peer %04x '%s' online (RSSI %.0f, SNR %.1f)\n", h.src, peer.name.c_str(), rssi, snr);
@@ -1217,6 +1235,9 @@ static void handlePacket(const uint8_t* buf, size_t len, float rssi, float snr) 
             cuesApplyTransport(t);
             break;
           }
+          case CMD_FW_UPDATE:
+            err = firmwareInstall();
+            break;
           default: err = "Unknown action";
         }
         doneCmds.push_back({src, nonce});
@@ -1546,6 +1567,8 @@ static void buildBeacon() {
   put<uint8_t>(b, pi.mode);
   put<uint32_t>(b, pi.ms);
   put<uint16_t>(b, pi.epoch);
+  put<uint32_t>(b, firmwareVersionCode());
+  put<uint8_t>(b, firmwareFlags());
   queuePacket(PT_BEACON, b);
 }
 
@@ -1585,6 +1608,13 @@ void syncLoop() {
     rebuildOwn();
     beaconRequested = true;
     beaconRepeatAt = now + 2000;  // a second beacon in case the first one got lost
+  }
+  // the others see "update available" / "updating" without waiting for the next regular beacon
+  static uint8_t lastFwFlags = 0;
+  uint8_t fwFlags = firmwareFlags();
+  if (fwFlags != lastFwFlags) {
+    lastFwFlags = fwFlags;
+    beaconRequested = true;
   }
   if (beaconRepeatAt && (int32_t)(now - beaconRepeatAt) >= 0) {
     beaconRepeatAt = 0;

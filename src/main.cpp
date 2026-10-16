@@ -15,6 +15,7 @@
 #include "system.h"
 #include "fixture_web.h"
 #include "cue_web.h"
+#include "firmware.h"
 #ifdef HAS_LORA
 #include "sync.h"
 #include "sync_web.h"
@@ -618,6 +619,7 @@ void setup(){
   delay(1000);
   Serial.println("\n\n=== DMX Box Starting ===");
   Serial.printf("Reset reason: %d\n", (int)esp_reset_reason());
+  firmwareBegin();
   displayInit();
   displayMessage("Starting...");
 
@@ -757,6 +759,7 @@ void loop(){
   if (restartAt && (long)(millis() - restartAt) >= 0) ESP.restart();
   
   processOTA();
+  firmwareLoop();
 #ifdef HAS_LORA
   syncLoop();
 #endif
@@ -816,7 +819,7 @@ void loop(){
     st.linkPeers = syncOnlinePeers();
 #endif
     st.boxName = localBoxName();
-    displayUpdate(st);
+    if (!(firmwareFlags() & FW_FLAG_UPDATING)) displayUpdate(st);  // firmwareLoop() shows the download
     framesAtLastDisplay = loopCounter;
     lastDisplayUpdate = now;
   }

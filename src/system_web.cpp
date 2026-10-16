@@ -1,6 +1,7 @@
 #include "system.h"
 #include "fixture_web.h"
 #include "cues.h"
+#include "firmware.h"
 #include <WiFi.h>
 #include <ArduinoJson.h>
 #include <LittleFS.h>
@@ -170,6 +171,7 @@ static void handleStatusApi(AsyncWebServerRequest* req) {
   doc["sched"] = scheduleText();
   doc["fps"] = loopFps;
   doc["reset"] = resetReasonText();
+  doc["fw"] = firmwareVersion();
   PlayInfo pi = cuesPlayInfo();
   JsonObject play = doc["play"].to<JsonObject>();
   play["seq"] = pi.seq;
@@ -195,6 +197,108 @@ static void handleStatusApi(AsyncWebServerRequest* req) {
   String out;
   serializeJson(doc, out);
   req->send(200, "application/json", out);
+}
+
+// ---------------- firmware ----------------
+
+static const char* fwStateName(FwState s) {
+  switch (s) {
+    case FW_CHECKING: return "checking";
+    case FW_UPTODATE: return "uptodate";
+    case FW_AVAILABLE: return "available";
+    case FW_DOWNLOADING: return "downloading";
+    case FW_DONE: return "done";
+    case FW_ERROR: return "error";
+    default: return "idle";
+  }
+}
+
+static String agoText(uint32_t ms) {
+  uint32_t s = (millis() - ms) / 1000;
+  if (s < 120) return String(s) + " s ago";
+  if (s < 7200) return String(s / 60) + " min ago";
+  return String(s / 3600) + " h ago";
+}
+
+static void renderFirmwareSection(AsyncResponseStream* r, bool sta) {
+  FirmwareStatus fw = firmwareStatus();
+  bool available = firmwareUpdateAvailable();
+  r->print("<h2 id='fw'>Firmware</h2><div class='panel'><table>");
+  r->printf("<tr><th>Installed</th><td class='mono'>%s <span class='meta'>%s</span></td></tr>", firmwareVersion(), firmwareEnv());
+#ifdef HAS_FW_UPDATE
+  r->print("<tr><th>Newest release</th><td>");
+  if (fw.latest.isEmpty()) r->print("<span class='muted'>unknown</span>");
+  else r->printf("<span class='mono'>%s</span> %s", esc(fw.latest).c_str(),
+                 available ? "<span class='ok'>update available</span>" : "<span class='meta'>installed</span>");
+  r->print("</td></tr><tr><th>Status</th><td>");
+  if (fw.state == FW_CHECKING) r->print("checking…");
+  else if (fw.state == FW_DOWNLOADING) r->printf("downloading, %d %%", fw.progress);
+  else if (fw.state == FW_DONE) r->print("installed, restarting");
+  else if (fw.lastCheckMs) r->printf("checked %s", agoText(fw.lastCheckMs).c_str());
+  else r->print("<span class='muted'>not checked yet</span>");
+  if (!fw.error.isEmpty()) r->printf("<br><span class='%s meta'>%s</span>", fw.state == FW_ERROR ? "err" : "muted", esc(fw.error).c_str());
+  r->print("</td></tr>");
+#endif
+  r->print("</table></div>");
+#ifndef HAS_FW_UPDATE
+  r->print("<p class='help'>This board has no room for online updates; update it over USB or espota.</p>");
+  return;
+#endif
+  if (!sta) {
+    r->print("<p class='help'>Updates come from the internet: connect the box to a WiFi network with internet access.</p>");
+    return;
+  }
+  r->print("<div class='row'><form action='/firmware/check' method='post'><button class='btn' type='submit'>Check now</button></form>");
+  if (available) {
+    r->printf("<form action='/firmware/install' method='post'><button class='btn primary' type='submit'>Install %s</button></form>",
+              esc(fw.latest).c_str());
+  }
+  r->print("</div>");
+  if (available) r->print("<p class='help'>The box downloads the update and restarts; DMX output stops for a few seconds.</p>");
+}
+
+static void handleFirmwareApi(AsyncWebServerRequest* req) {
+  FirmwareStatus fw = firmwareStatus();
+  JsonDocument doc;
+  doc["version"] = firmwareVersion();
+  doc["env"] = firmwareEnv();
+  doc["state"] = fwStateName(fw.state);
+  doc["latest"] = fw.latest;
+  doc["available"] = firmwareUpdateAvailable();
+  doc["progress"] = fw.progress;
+  doc["error"] = fw.error;
+  doc["internet"] = firmwareHasInternet();
+  if (fw.lastCheckMs) doc["checkedAgo"] = (millis() - fw.lastCheckMs) / 1000;
+  String out;
+  serializeJson(doc, out);
+  req->send(200, "application/json", out);
+}
+
+static void handleFirmwareCheck(AsyncWebServerRequest* req) {
+  if (apModeActive || WiFi.status() != WL_CONNECTED)
+    return sendMessage(req, 409, "No internet", "Connect the box to a WiFi network with internet access first.");
+  firmwareCheckNow();
+  sendProgress(req, "Firmware", "Looking for a new release…", "/connectivity#fw", 5);
+}
+
+static void handleFirmwareInstall(AsyncWebServerRequest* req) {
+  String err = firmwareInstall();
+  if (!err.isEmpty()) return sendMessage(req, 409, "Firmware update", err);
+  AsyncResponseStream* r = pageBegin(req, "Firmware update");
+  r->print("<h1>Firmware update</h1><div class='panel row'><span class='spin'></span><span id='fwmsg'>Looking for the "
+           "newest release…</span></div>");
+  // polls until the box answers with another version (= restarted with the new firmware)
+  r->printf("<script>(function(){const old='%s',m=document.getElementById('fwmsg');"
+            "const stop=t=>{m.textContent=t;const s=document.querySelector('.spin');if(s)s.remove()};"
+            "async function poll(){try{const s=await(await fetch('/api/firmware',{cache:'no-store'})).json();"
+            "if(s.version!==old){location.replace('/connectivity#fw');return}"
+            "if(s.state==='downloading')m.textContent='Downloading '+s.latest+': '+s.progress+' %%';"
+            "else if(s.state==='done')m.textContent='Installed, the box restarts…';"
+            "else if(s.state==='error')return stop('Update failed: '+s.error);"
+            "else if(s.state==='uptodate')return stop(s.error||'Already up to date');"
+            "}catch(e){m.textContent='The box restarts…'}setTimeout(poll,1000)}poll()})();</script>",
+            firmwareVersion());
+  pageEnd(req, r);
 }
 
 // ---------------- connectivity ----------------
@@ -229,6 +333,7 @@ static void handleConnectivity(AsyncWebServerRequest* req) {
   r->print("<form class='f panel' action='/wificonnect' method='post'><label>Network name (SSID)</label>"
            "<input name='ssid' required><label>Password</label><input name='password' type='password'>"
            "<div class='row'><button class='btn primary grow' type='submit'>Connect and restart</button></div></form>");
+  renderFirmwareSection(r, sta);
 #ifdef HAS_LORA
   renderLoraSection(r);
 #endif
@@ -335,4 +440,9 @@ void registerSystemRoutes(AsyncWebServer& server) {
   server.on("/wificonnect", HTTP_ANY, handleWifiConnect);
   server.on("/timesetup", HTTP_GET, handleTimeSetup);
   server.on("/timesave", HTTP_ANY, handleTimeSave);
+  server.on("/api/firmware", HTTP_GET, handleFirmwareApi);
+#ifdef HAS_FW_UPDATE
+  server.on("/firmware/check", HTTP_POST, handleFirmwareCheck);
+  server.on("/firmware/install", HTTP_POST, handleFirmwareInstall);
+#endif
 }
