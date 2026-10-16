@@ -6,6 +6,7 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include <esp_system.h>
+#include <Update.h>
 #ifdef HAS_LORA
 #include "sync.h"
 #include "sync_web.h"
@@ -240,21 +241,96 @@ static void renderFirmwareSection(AsyncResponseStream* r, bool sta) {
   r->print("</td></tr>");
 #endif
   r->print("</table></div>");
-#ifndef HAS_FW_UPDATE
-  r->print("<p class='help'>This board has no room for online updates; update it over USB or espota.</p>");
-  return;
-#endif
+#ifdef HAS_FW_UPDATE
   if (!sta) {
-    r->print("<p class='help'>Updates come from the internet: connect the box to a WiFi network with internet access.</p>");
+    r->print("<p class='help'>Online updates need a WiFi network with internet access. Without one, upload the file below.</p>");
+  } else {
+    r->print("<div class='row'><form action='/firmware/check' method='post'><button class='btn' type='submit'>Check now</button></form>");
+    if (available) {
+      r->printf("<form action='/firmware/install' method='post'><button class='btn primary' type='submit'>Install %s</button></form>",
+                esc(fw.latest).c_str());
+    }
+    r->print("</div>");
+    if (available) r->print("<p class='help'>The box downloads the update and restarts; DMX output stops for a few seconds.</p>");
+  }
+#endif
+  // upload: works on every board and without internet (e.g. on the box's own access point)
+  r->printf("<form class='f panel' id='fwup'><label>Upload firmware file</label><input type='file' name='fw' accept='.bin' required>"
+            "<p class='help'>The file <span class='mono'>firmware-%s.bin</span> from a "
+            "<a href='https://github.com/hansimglueck/DmxBox/releases/latest' target='_blank'>release</a>, downloaded "
+            "beforehand. The box installs it and restarts.</p>"
+            "<div class='row'><button class='btn grow' type='submit'>Upload and install</button></div><div class='meta' id='fwupmsg'></div></form>",
+            firmwareEnv());
+  r->print("<script>(function(){const F=document.getElementById('fwup'),M=document.getElementById('fwupmsg');"
+           "F.addEventListener('submit',e=>{e.preventDefault();const f=F.fw.files[0];if(!f)return;"
+           "if(!confirm('Install '+f.name+'? The box restarts.'))return;"
+           "F.querySelector('button').disabled=true;const x=new XMLHttpRequest();"
+           "x.upload.onprogress=p=>{if(p.lengthComputable)M.textContent='Uploading '+Math.round(p.loaded*100/p.total)+' %'};"
+           "x.onload=()=>{if(x.status!==200){M.innerHTML='<span class=err>'+x.responseText.replace(/</g,'&lt;')+'</span>';"
+           "F.querySelector('button').disabled=false;return}"
+           "M.textContent='Installed, the box restarts…';let down=false;"
+           "const wait=()=>fetch('/api/ping',{cache:'no-store'}).then(r=>{if(down&&r.ok)location.reload();else setTimeout(wait,1500)})"
+           ".catch(()=>{down=true;setTimeout(wait,1500)});setTimeout(wait,1500)};"
+           "x.onerror=()=>{M.textContent='Upload failed';F.querySelector('button').disabled=false};"
+           "const d=new FormData();d.append('fw',f,f.name);x.open('POST','/firmware/upload');x.send(d)})})();</script>");
+}
+
+// ---------------- firmware upload ----------------
+
+static String uploadError;
+static bool uploadActive = false;
+
+static void handleFirmwareUploadData(AsyncWebServerRequest* req, const String& filename, size_t index, uint8_t* data,
+                                     size_t len, bool final) {
+  if (index == 0) {
+    uploadError = "";
+    uploadActive = false;
+    if (firmwareBusy()) {
+      uploadError = "An online update is running";
+      return;
+    }
+    // ESP image header: magic 0xE9, chip id at byte 12 (a file for another board is refused right away)
+    if (len < 16 || data[0] != 0xE9) {
+      uploadError = "Not a firmware file";
+      return;
+    }
+#ifdef CONFIG_IDF_FIRMWARE_CHIP_ID
+    if ((data[12] | data[13] << 8) != CONFIG_IDF_FIRMWARE_CHIP_ID) {
+      uploadError = String("Firmware for another board; this box needs firmware-") + firmwareEnv() + ".bin";
+      return;
+    }
+#endif
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+      uploadError = String("Cannot start update: ") + Update.errorString();
+      return;
+    }
+    uploadActive = true;
+    Serial.printf("Firmware: upload of %s started\n", filename.c_str());
+  }
+  if (!uploadActive) return;
+  if (Update.write(data, len) != len) {
+    uploadError = String("Flash write failed: ") + Update.errorString();
+    Update.abort();
+    uploadActive = false;
     return;
   }
-  r->print("<div class='row'><form action='/firmware/check' method='post'><button class='btn' type='submit'>Check now</button></form>");
-  if (available) {
-    r->printf("<form action='/firmware/install' method='post'><button class='btn primary' type='submit'>Install %s</button></form>",
-              esc(fw.latest).c_str());
+  if (final) {
+    uploadActive = false;
+    // verifies the image; only then the box boots the new firmware
+    if (!Update.end(true)) uploadError = String("File incomplete or damaged (") + Update.errorString() + "), the old firmware stays";
+    Serial.printf("Firmware: upload %s\n", uploadError.isEmpty() ? "installed, restarting" : uploadError.c_str());
   }
-  r->print("</div>");
-  if (available) r->print("<p class='help'>The box downloads the update and restarts; DMX output stops for a few seconds.</p>");
+}
+
+static void handleFirmwareUploadDone(AsyncWebServerRequest* req) {
+  if (uploadActive) {  // connection ended before the last chunk
+    Update.abort();
+    uploadActive = false;
+    uploadError = "Upload incomplete";
+  }
+  if (!uploadError.isEmpty()) return req->send(400, "text/plain", uploadError);
+  req->send(200, "text/plain", "ok");
+  restartRequested = true;
 }
 
 static void handleFirmwareApi(AsyncWebServerRequest* req) {
@@ -443,6 +519,7 @@ void registerSystemRoutes(AsyncWebServer& server) {
   server.on("/timesetup", HTTP_GET, handleTimeSetup);
   server.on("/timesave", HTTP_ANY, handleTimeSave);
   server.on("/api/firmware", HTTP_GET, handleFirmwareApi);
+  server.on("/firmware/upload", HTTP_POST, handleFirmwareUploadDone, handleFirmwareUploadData);
 #ifdef HAS_FW_UPDATE
   server.on("/firmware/check", HTTP_POST, handleFirmwareCheck);
   server.on("/firmware/install", HTTP_POST, handleFirmwareInstall);

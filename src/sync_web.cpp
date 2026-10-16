@@ -24,11 +24,12 @@ static bool canUpdateFirmware(const PeerInfo& p, uint32_t latestCode) {
          ((p.fwFlags & FW_FLAG_AVAILABLE) || latestCode > p.fwCode);
 }
 
-static String peerFirmwareLabel(const PeerInfo& p) {
+// "update available": what that box found itself, or a newer release this box knows of
+static String peerFirmwareLabel(const PeerInfo& p, uint32_t latestCode) {
   if (!p.fwKnown) return "firmware unknown (older)";
   String s = p.fwCode ? "v" + versionString(p.fwCode) : String("unreleased build");
   if (p.fwFlags & FW_FLAG_UPDATING) s += " · <span class='warn'>updating…</span>";
-  else if (p.fwFlags & FW_FLAG_AVAILABLE) s += " · <span class='ok'>update available</span>";
+  else if ((p.fwFlags & FW_FLAG_AVAILABLE) || latestCode > p.fwCode) s += " · <span class='ok'>update available</span>";
   if (!(p.fwFlags & FW_FLAG_INTERNET)) s += " · no internet";
   return s;
 }
@@ -62,7 +63,7 @@ void renderLoraSection(AsyncResponseStream* r) {
     String label = host.isEmpty() ? esc(p.name)
                                   : "<a href='http://" + host + ".local/' title='" + host + ".local'>" + esc(p.name) + "</a>";
     r->printf("<tr><td>%s<br><span class='meta mono'>%04x · %u fixtures</span><br><span class='meta'>%s</span></td>",
-              label.c_str(), p.id, p.fixCount, peerFirmwareLabel(p).c_str());
+              label.c_str(), p.id, p.fixCount, peerFirmwareLabel(p, latestCode).c_str());
     r->printf("<td>%s<br><span class='meta'>%s ago</span>", p.online() ? "online" : "<span class='err'>offline</span>",
               ago(p.lastSeenMs).c_str());
     if (canUpdateFirmware(p, latestCode)) {

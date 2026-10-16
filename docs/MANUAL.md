@@ -255,6 +255,17 @@ Hat eine Box Internet und gibt es eine neuere Version, erscheint dort *Update* (
 *Update all*). Den Download macht jede Box selbst, sie braucht also eigenes Internet. Steht „no internet“
 dabei, muss sie erst in ein WLAN.
 
+**Ohne Internet: Datei hochladen.** Das geht auf allen Boxen, auch auf denen ohne LoRa:
+1. Vorher die passende Datei aus dem [neuesten Release](https://github.com/hansimglueck/DmxBox/releases/latest)
+   laden. Den Dateinamen nennt die Seite, z.B. `firmware-heltec-v4.bin`.
+2. Mit der Box verbinden, notfalls über ihren eigenen Access Point.
+3. Unter *Connectivity → Firmware → Upload firmware file* die Datei wählen.
+
+Dateien für ein anderes Board und beschädigte Dateien lehnt die Box ab.
+
+Über LoRa lässt sich keine Firmware übertragen: Das würde pro Box mehrere Stunden dauern und den Funk
+in dieser Zeit komplett belegen.
+
 Schlägt ein Update fehl, bleibt die bisherige Firmware aktiv. Boxen mit älterer Firmware ohne
 Update-Funktion erscheinen als „firmware unknown (older)“. Sie brauchen einmal ein Update per USB.
 
