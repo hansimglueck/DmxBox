@@ -58,6 +58,7 @@ static bool busy = false;
 static bool internet = false;      // the last check reached the release server
 static uint32_t lastAttemptMs = 0;  // 0 = no check yet
 static bool lastAttemptOk = false;
+static bool checkedOnce = false;    // a check has finished (with or without success)
 static volatile bool checkRequested = false;
 
 namespace {
@@ -68,6 +69,10 @@ struct Lock {
 }  // namespace
 
 static bool staConnected() { return !apModeActive && WiFi.status() == WL_CONNECTED; }
+
+// Until the first check (30 s after boot) a WiFi connection counts as internet, so that the other boxes
+// do not show "no internet" after every restart. Caller holds the lock.
+static bool internetLikely() { return staConnected() && (internet || !checkedOnce); }
 
 static void beginRequest(WiFiClientSecure& client, HTTPClient& http) {
   client.setCACert(FW_ROOT_CAS);
@@ -207,6 +212,7 @@ static void fwTask(void* arg) {
   {
     Lock l;
     internet = reached;
+    checkedOnce = true;
     lastAttemptOk = ok;
     if (!rel.version.isEmpty()) {
       st.latest = rel.version;
@@ -314,7 +320,7 @@ bool firmwareBusy() {
 
 bool firmwareHasInternet() {
   Lock l;
-  return internet && staConnected();
+  return internetLikely();
 }
 
 bool firmwareUpdateAvailable() {
@@ -325,7 +331,7 @@ bool firmwareUpdateAvailable() {
 uint8_t firmwareFlags() {
   Lock l;
   uint8_t f = 0;
-  if (internet && staConnected()) f |= FW_FLAG_INTERNET;
+  if (internetLikely()) f |= FW_FLAG_INTERNET;
   if (st.latestCode > firmwareVersionCode()) f |= FW_FLAG_AVAILABLE;
   if (st.state == FW_DOWNLOADING || st.state == FW_DONE) f |= FW_FLAG_UPDATING;
   return f;
