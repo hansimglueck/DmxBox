@@ -6,6 +6,7 @@
 #include "fader_ui.h"
 #include "cue_web.h"
 #include "firmware.h"
+#include "system.h"
 #include <algorithm>
 
 static String ago(uint32_t ms) {
@@ -56,8 +57,12 @@ void renderLoraSection(AsyncResponseStream* r) {
   r->print("<div class='panel'><table><tr><th>Box</th><th>Status</th><th>Signal</th><th>Ping</th></tr>");
   if (peers.empty()) r->print("<tr><td colspan='4' class='muted'>No other box heard yet.</td></tr>");
   for (const PeerInfo& p : peers) {
+    // the hostname follows the box name (see applyStoredNetworkName); reachable when we share a network
+    String host = p.named ? networkNameFor(p.name) : String("");
+    String label = host.isEmpty() ? esc(p.name)
+                                  : "<a href='http://" + host + ".local/' title='" + host + ".local'>" + esc(p.name) + "</a>";
     r->printf("<tr><td>%s<br><span class='meta mono'>%04x · %u fixtures</span><br><span class='meta'>%s</span></td>",
-              esc(p.name).c_str(), p.id, p.fixCount, peerFirmwareLabel(p).c_str());
+              label.c_str(), p.id, p.fixCount, peerFirmwareLabel(p).c_str());
     r->printf("<td>%s<br><span class='meta'>%s ago</span>", p.online() ? "online" : "<span class='err'>offline</span>",
               ago(p.lastSeenMs).c_str());
     if (canUpdateFirmware(p, latestCode)) {

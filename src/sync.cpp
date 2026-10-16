@@ -1065,6 +1065,7 @@ static void handlePacket(const uint8_t* buf, size_t len, float rssi, float snr) 
     case PT_BEACON: {
       if (!get(p, end, peer.fixVersion) || !get(p, end, peer.fixCount) || !get(p, end, peer.uptimeS) ||
           !getStr(p, end, peer.name)) return;
+      peer.named = true;
       uint16_t showVer, playSeq, playCue, playEpoch;
       uint32_t showCrc, playMs;
       uint8_t playMode;

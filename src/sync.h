@@ -14,6 +14,7 @@ struct PeerInfo {
   uint16_t fixVersion = 0;
   uint8_t fixCount = 0;
   uint32_t uptimeS = 0;
+  bool named = false;    // name from a beacon (until then a placeholder "Box <id>")
   bool fwKnown = false;  // false: firmware too old to report its version
   uint32_t fwCode = 0;   // see firmwareVersionCode()
   uint8_t fwFlags = 0;   // FW_FLAG_*
