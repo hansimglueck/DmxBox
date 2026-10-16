@@ -3,6 +3,7 @@
 #include "lora_link.h"
 #include "fixtures.h"
 #include "presets.h"
+#include "cues.h"
 #include "system.h"
 #include <esp_rom_crc.h>
 #include <LittleFS.h>
@@ -13,7 +14,7 @@
 extern uint8_t data[];
 
 static const char* LINK_FILE = "/link.json";
-static const uint8_t PROTO_VER = 4;
+static const uint8_t PROTO_VER = 6;
 static const uint32_t BEACON_INTERVAL_MS = 10000;
 static const uint32_t VALUES_CHECK_MS = 200;
 static const uint32_t VALUES_REFRESH_MS = 60000;
@@ -43,15 +44,25 @@ enum : uint8_t {
   PT_ACK = 11,
   PT_DEF_PUSH = 12,
   PT_DEF_ACK = 13,
+  PT_SHOW = 14,      // show metadata chunk (broadcast)
+  PT_SHOW_REQ = 15,  // request show metadata chunks from one box
+  PT_MARKS = 16,     // channels changed by hand on the sender
+  PT_DEF_REQ = 17,   // request one definition (by uid) from one box
 };
+static const uint32_t DEF_PULL_TIMEOUT_MS = 20000;
+static const uint32_t DEF_RECONCILE_MS = 30000;
 // command ops beyond the preset ops (PresetOp, 1..5)
-enum : uint8_t { CMD_FIXTURE_SAVE = 10, CMD_FIXTURE_DELETE, CMD_SNAPSHOT_SAVE, CMD_SNAPSHOT_RESET };
+// cue ops reuse the command fields: fixtureId = sequence, presetId = cue, group = insert / mode,
+// address = move
+enum : uint8_t { CMD_FIXTURE_SAVE = 10, CMD_FIXTURE_DELETE = 11, CMD_CUE_STORE = 20, CMD_TRANSPORT = 21 };
 static const uint32_t DEF_PUSH_RETRY_MS = 5000;
 static const uint8_t DEF_PUSH_MAX_ATTEMPTS = 3;
-static const uint32_t SNAPSHOT_SHOW_MS = 60000;
+static const uint32_t STORE_SHOW_MS = 60000;
+static const uint32_t MARKS_MIN_INTERVAL_MS = 300;
+static const uint32_t BEACON_AIRTIME_MS = 40;  // play state age when a beacon arrives
 static const size_t PRESETS_PER_FIXTURE_MAX = 60;
 static const uint32_t CMD_RETRY_MS = 1500;
-static const uint8_t CMD_MAX_ATTEMPTS = 3;
+static const uint8_t CMD_MAX_ATTEMPTS = 5;
 
 struct __attribute__((packed)) PktHdr {
   uint8_t m0, m1, ver, net;
@@ -75,6 +86,7 @@ struct DescAssembly {
 
 struct BoxState {
   RemoteBox box;
+  uint16_t errorNonce = 0;  // command that reported box.lastError
   uint16_t describedVersion = 0;
   DescAssembly asmb;
   uint32_t lastSetPacketMs = 0;
@@ -89,11 +101,11 @@ struct PendingSet {
 static const uint8_t SET_FAILED = 0xFF;
 
 struct PendingCmd {
-  uint16_t box, nonce;
-  uint8_t op;
-  uint16_t fixtureId;
-  uint8_t group;
-  uint16_t presetId;
+  uint16_t box = 0, nonce = 0;
+  uint8_t op = 0;
+  uint16_t fixtureId = 0;
+  uint8_t group = 0;
+  uint16_t presetId = 0;
   String name;
   uint16_t address = 0, defId = 0, count = 0;  // fixture ops
   uint8_t attempts = 0;
@@ -103,11 +115,18 @@ struct PendingCmd {
 // Sending a definition to another box, followed by saving a fixture that uses it.
 struct DefPush {
   uint16_t box, xfer;
+  uint32_t uid = 0;
   std::vector<uint8_t> json;
   uint32_t sendMask = 0;
   uint8_t attempts = 0;
   uint32_t lastSendMs = 0;
-  PendingCmd then;  // CMD_FIXTURE_SAVE; defId filled in from the ACK
+  PendingCmd then;  // CMD_FIXTURE_SAVE (defId filled in from the ACK), op 0 = only the definition
+};
+
+// Definition that another box has in a newer revision (or that we do not have yet).
+struct DefPull {
+  uint16_t box;
+  uint32_t uid;
 };
 
 // Receiving side of a definition transfer.
@@ -121,10 +140,23 @@ struct DefAssembly {
   uint32_t lastMs = 0;
 };
 
-struct SnapshotRun {
-  bool reset = false;
+struct StoreRun {
   uint32_t startedMs = 0;
-  std::vector<std::pair<uint16_t, int8_t>> boxes;  // box, 0 pending / 1 ok / -1 failed
+  uint16_t localCount = 0;
+  struct Entry {
+    uint16_t box;
+    int8_t state;  // 0 pending / 1 ok / -1 failed
+    uint16_t count;
+  };
+  std::vector<Entry> boxes;
+};
+
+// Receiving side of a show metadata transfer.
+struct ShowAssembly {
+  uint16_t src = 0, ver = 0, total = 0;
+  uint32_t mask = 0;
+  std::vector<uint8_t> buf;
+  uint32_t lastMs = 0;
 };
 
 static Link* transport = &loraLink;
@@ -141,7 +173,29 @@ static std::vector<std::pair<uint16_t, uint16_t>> doneCmds;
 static uint32_t lastRefsVersion = 0xFFFFFFFF;
 static std::vector<DefPush> defPushes;
 static std::vector<DefAssembly> defAssemblies;
-static SnapshotRun snapshotRun;
+static std::vector<DefPull> defPulls;
+static DefPull activePull = {0, 0};
+static uint32_t activePullMs = 0;
+static StoreRun storeRun;
+static ShowAssembly showAsm;
+static std::vector<uint8_t> showBlob;     // our show metadata as sent
+static uint16_t showBlobVer = 0;
+static uint32_t showSendMask = 0;
+static uint16_t lastShowVer = 0xFFFF;      // show version last seen in syncLoop
+static bool showVerApplied = false;        // the change came from another box: no re-broadcast
+static uint32_t lastMarksVer = 0xFFFFFFFF;
+static uint32_t lastMarksSentMs = 0;
+static bool marksSendPending = false;
+// newest transport per sender, so that a late retry cannot undo a newer state. Retries end after
+// CMD_MAX_ATTEMPTS * CMD_RETRY_MS; older entries are ignored (the sender may have restarted).
+struct LastTransport {
+  uint16_t src, nonce;
+  uint32_t ms;
+};
+static std::vector<LastTransport> lastTransport;
+static const uint32_t TRANSPORT_ORDER_MS = 12000;
+// replies (stored channel count) of executed cue stores, for retried commands
+static std::vector<std::pair<std::pair<uint16_t, uint16_t>, String>> storedReplies;
 static bool refsSendPending = false;
 static std::vector<std::vector<uint8_t>> txQueue;
 static SemaphoreHandle_t mtx = nullptr;
@@ -158,6 +212,11 @@ static uint32_t descSendMask = 0;
 static bool used[513] = {};
 static uint8_t lastSent[513] = {};
 static bool fullRefreshPending = false;
+// changed values are sent once more after changes stopped for a while (one lost packet would
+// otherwise leave the others with an old value until the next full refresh)
+static const uint32_t VALUES_REPEAT_MS = 1000;
+static bool repeatAddr[513] = {};
+static uint32_t valuesRepeatAt = 0;
 static bool valuesCheckNow = false;
 static uint32_t lastValuesCheckMs = 0;
 static uint32_t nextFullRefreshMs = 0;
@@ -194,7 +253,7 @@ static void loadSettings(const char* defaultName) {
   if (f) {
     JsonDocument doc;
     if (!deserializeJson(doc, f)) {
-      settings.name = doc["name"] | defaultName;
+      settings.name = migrateBoxName(doc["name"] | defaultName);
       settings.password = doc["password"] | "dmxbox";
       settings.enabled = doc["enabled"] | true;
       settings.txPower = doc["txPower"] | 14;
@@ -314,6 +373,31 @@ void syncPresetCommand(uint16_t box, uint8_t op, uint16_t fixtureId, uint8_t gro
   pendingCmds.push_back(c);
 }
 
+// Definition as sent over the link: DmxBox JSON plus uid and revision.
+static std::vector<uint8_t> defTransferJson(const FixtureDef& d) {
+  JsonDocument doc;
+  defToJson(d, doc.to<JsonObject>());
+  doc["uid"] = d.uid;
+  doc["rev"] = d.rev;
+  String s;
+  serializeJson(doc, s);
+  return std::vector<uint8_t>(s.c_str(), s.c_str() + s.length());
+}
+
+String syncDefUsedBy(uint32_t uid) {
+  Lock l;
+  String out;
+  for (const BoxState& b : boxes) {
+    for (const RemoteDef& rd : b.box.defs) {
+      if (rd.uid != uid) continue;
+      for (const RemoteFixture& f : b.box.fixtures) {
+        if (f.defId == rd.id) out += (out.isEmpty() ? "" : ", ") + f.name + " (" + b.box.peer.name + ")";
+      }
+    }
+  }
+  return out;
+}
+
 void syncRemoteFixtureSave(uint16_t box, uint16_t fixtureId, const String& name, uint16_t address,
                            uint16_t remoteDefId, int pushLocalDef, uint16_t count) {
   PendingCmd c;
@@ -328,13 +412,7 @@ void syncRemoteFixtureSave(uint16_t box, uint16_t fixtureId, const String& name,
   if (pushLocalDef >= 0) {
     fixturesLock();
     FixtureDef* d = findDef(pushLocalDef);
-    if (d) {
-      JsonDocument doc;
-      defToJson(*d, doc.to<JsonObject>());
-      String s;
-      serializeJson(doc, s);
-      json.assign(s.c_str(), s.c_str() + s.length());
-    }
+    if (d) json = defTransferJson(*d);
     fixturesUnlock();
   }
   Lock l;
@@ -369,51 +447,71 @@ int syncPendingFor(uint16_t box) {
   return n;
 }
 
-void syncSnapshotAll(bool reset) {
-  if (reset) snapshotReset();
-  else snapshotSave();
-  Lock l;
-  snapshotRun = SnapshotRun();
-  snapshotRun.reset = reset;
-  snapshotRun.startedMs = millis();
-  for (const BoxState& b : boxes) {
-    if (!b.box.peer.online()) continue;
-    PendingCmd c;
-    c.box = b.box.peer.id;
-    c.nonce = nextNonce++;
-    c.op = reset ? CMD_SNAPSHOT_RESET : CMD_SNAPSHOT_SAVE;
-    c.fixtureId = 0;
-    c.group = 0;
-    c.presetId = 0;
-    pendingCmds.push_back(c);
-    snapshotRun.boxes.push_back({c.box, 0});
+// Caller holds the lock.
+static void queueCmdToAll(uint8_t op, uint16_t a, uint8_t b, uint16_t c, uint16_t d, uint16_t e,
+                          std::vector<uint16_t>* sentTo = nullptr) {
+  for (const BoxState& bs : boxes) {
+    if (!bs.box.peer.online()) continue;
+    PendingCmd cmd;
+    cmd.box = bs.box.peer.id;
+    cmd.nonce = nextNonce++;
+    cmd.op = op;
+    cmd.fixtureId = a;
+    cmd.group = b;
+    cmd.presetId = c;
+    cmd.address = d;
+    cmd.count = e;
+    pendingCmds.push_back(cmd);
+    if (sentTo) sentTo->push_back(cmd.box);
   }
 }
 
-SnapshotStatus syncSnapshotStatus() {
+void syncTransport(const CueTransport& t) {
   Lock l;
-  SnapshotStatus st;
-  if (!snapshotRun.startedMs || millis() - snapshotRun.startedMs > SNAPSHOT_SHOW_MS) return st;
+  queueCmdToAll(CMD_TRANSPORT, t.seq, t.mode, t.cue, t.move, t.epoch);
+}
+
+void syncCueStore(const CueStoreResult& r) {
+  Lock l;
+  storeRun = StoreRun();
+  storeRun.startedMs = millis();
+  storeRun.localCount = r.count;
+  std::vector<uint16_t> sent;
+  queueCmdToAll(CMD_CUE_STORE, r.seq, r.insert ? 1 : 0, r.cue, 0, r.epoch, &sent);
+  for (uint16_t b : sent) storeRun.boxes.push_back({b, 0, 0});
+}
+
+CueStoreStatus syncCueStoreStatus() {
+  Lock l;
+  CueStoreStatus st;
+  if (!storeRun.startedMs || millis() - storeRun.startedMs > STORE_SHOW_MS) return st;
   st.active = true;
-  st.reset = snapshotRun.reset;
-  st.total = 1 + snapshotRun.boxes.size();
+  st.total = 1 + storeRun.boxes.size();
   st.ok = 1;
-  for (const auto& e : snapshotRun.boxes) {
-    if (e.second > 0) st.ok++;
-    else if (e.second == 0) st.pending++;
-    else {
-      BoxState* b = nullptr;
-      for (BoxState& x : boxes) if (x.box.peer.id == e.first) b = &x;
-      st.failed.push_back(b ? b->box.peer.name : String(e.first, HEX));
+  st.counts.push_back({settings.name, storeRun.localCount});
+  for (const auto& e : storeRun.boxes) {
+    BoxState* b = nullptr;
+    for (BoxState& x : boxes) if (x.box.peer.id == e.box) b = &x;
+    String name = b ? b->box.peer.name : String(e.box, HEX);
+    if (e.state > 0) {
+      st.ok++;
+      st.counts.push_back({name, e.count});
+    } else if (e.state == 0) {
+      st.pending++;
+    } else {
+      st.failed.push_back(name);
     }
   }
   return st;
 }
 
 // Caller holds the lock.
-static void snapshotResult(uint16_t box, bool ok) {
-  for (auto& e : snapshotRun.boxes) {
-    if (e.first == box && e.second == 0) e.second = ok ? 1 : -1;
+static void storeResult(uint16_t box, bool ok, uint16_t count) {
+  for (auto& e : storeRun.boxes) {
+    if (e.box == box && e.state == 0) {
+      e.state = ok ? 1 : -1;
+      e.count = count;
+    }
   }
 }
 
@@ -537,11 +635,24 @@ static void rebuildOwn() {
     put<uint32_t>(defs, defCrc(d));
     put<uint16_t>(defs, d.channels.size());
     putStr(defs, d.name, FIXTURE_NAME_MAX);
+    put<uint32_t>(defs, d.uid);
+    put<uint16_t>(defs, d.rev);
     defCount++;
   }
+  std::vector<DefTombstone> tombs = defTombstones();
   fixturesUnlock();
   put<uint8_t>(blob, defCount);
   blob.insert(blob.end(), defs.begin(), defs.end());
+  uint8_t nt = 0;
+  std::vector<uint8_t> tb;
+  for (auto it = tombs.rbegin(); it != tombs.rend() && nt < 255; ++it) {
+    if (blob.size() + tb.size() + 8 > CHUNK * MAX_CHUNKS) break;
+    put<uint32_t>(tb, it->uid);
+    put<uint16_t>(tb, it->rev);
+    nt++;
+  }
+  put<uint8_t>(blob, nt);
+  blob.insert(blob.end(), tb.begin(), tb.end());
   descBlob = blob;
   descSendMask = 0;
   ownBuilt = true;
@@ -564,7 +675,7 @@ static bool wantValue(uint16_t a, bool all) {
 }
 
 // Sends spans of changed (or all used) channels.
-static void sendValues(bool all) {
+static void sendValues(bool all, bool repeat = false) {
   std::vector<uint8_t> pkt;
   uint8_t spans = 0;
   auto flush = [&]() {
@@ -593,6 +704,10 @@ static void sendValues(bool all) {
     for (uint16_t i = start; i <= end; i++) {
       pkt.push_back(data[i]);
       lastSent[i] = data[i];
+      if (!all && !repeat) {
+        repeatAddr[i] = true;
+        valuesRepeatAt = millis() + VALUES_REPEAT_MS;
+      }
     }
     spans++;
     a = end + 1;
@@ -607,7 +722,8 @@ static bool anyPeerOnline() {
 
 // ---------- receiving ----------
 
-static bool parseDesc(const std::vector<uint8_t>& blob, std::vector<RemoteFixture>& out, std::vector<RemoteDef>& defsOut) {
+static bool parseDesc(const std::vector<uint8_t>& blob, std::vector<RemoteFixture>& out, std::vector<RemoteDef>& defsOut,
+                      std::vector<RemoteTomb>& tombsOut) {
   const uint8_t* p = blob.data();
   const uint8_t* end = p + blob.size();
   uint8_t count;
@@ -642,10 +758,116 @@ static bool parseDesc(const std::vector<uint8_t>& blob, std::vector<RemoteFixtur
   defsOut.clear();
   for (uint8_t i = 0; i < nd; i++) {
     RemoteDef d;
-    if (!get(p, end, d.id) || !get(p, end, d.crc) || !get(p, end, d.channels) || !getStr(p, end, d.name)) return false;
+    if (!get(p, end, d.id) || !get(p, end, d.crc) || !get(p, end, d.channels) || !getStr(p, end, d.name) ||
+        !get(p, end, d.uid) || !get(p, end, d.rev)) return false;
     defsOut.push_back(d);
   }
+  tombsOut.clear();
+  uint8_t nt;
+  if (!get(p, end, nt)) return false;
+  for (uint8_t i = 0; i < nt; i++) {
+    RemoteTomb t;
+    if (!get(p, end, t.uid) || !get(p, end, t.rev)) return false;
+    tombsOut.push_back(t);
+  }
   return true;
+}
+
+// ---------- link-wide definitions ----------
+
+static inline bool revNewer(uint16_t a, uint16_t b) { return (int16_t)(a - b) > 0; }
+
+static void queuePull(uint16_t box, uint32_t uid) {
+  if (activePull.box && activePull.uid == uid) return;
+  for (const DefPull& p : defPulls) if (p.uid == uid) return;
+  defPulls.push_back({box, uid});
+}
+
+// Compares that box's definitions and deletions with ours: newer ones are fetched, deletions applied.
+// Caller holds the lock.
+static void reconcileDefs(BoxState& b) {
+  if (!b.box.described) return;
+  uint16_t src = b.box.peer.id;
+  fixturesLock();
+  for (const RemoteDef& rd : b.box.defs) {
+    if (!rd.uid) continue;
+    FixtureDef* local = findDefByUid(rd.uid);
+    if (local) {
+      if (revNewer(rd.rev, local->rev) || (rd.rev == local->rev && rd.crc != defCrc(*local) && src < boxId)) {
+        queuePull(src, rd.uid);
+      }
+    } else {
+      int t = defTombstoneRev(rd.uid);
+      if (t >= 0 && !revNewer(rd.rev, (uint16_t)t)) continue;  // deleted here after that revision
+      queuePull(src, rd.uid);
+    }
+  }
+  for (const RemoteTomb& t : b.box.tombs) {
+    FixtureDef* local = findDefByUid(t.uid);
+    if (!local) {
+      defAddTombstone(t.uid, t.rev);  // pass the deletion on
+      continue;
+    }
+    if (!revNewer(t.rev, local->rev)) continue;  // changed here after it was deleted there
+    bool used = false;
+    for (const Fixture& f : fixtureList) used |= f.defId == local->id;
+    if (used) {
+      // still needed here: keep it and announce it again, newer than the deletion
+      FixtureDef keep = *local;
+      keep.rev = t.rev + 1;
+      saveDef(keep, true);
+      Serial.printf("Link: definition '%s' deleted on %04x but used here, kept\n", keep.name.c_str(), src);
+    } else {
+      Serial.printf("Link: definition '%s' deleted on %04x\n", local->name.c_str(), src);
+      deleteDef(local->id, t.rev);
+    }
+  }
+  fixturesUnlock();
+}
+
+// A definition received with uid: replaces ours if newer, otherwise creates it. Returns our id.
+static uint16_t upsertDef(JsonDocument& doc, uint16_t src, String& err) {
+  FixtureDef nd;
+  if (!defFromJson(doc.as<JsonVariantConst>(), nd)) {
+    err = "Definition unreadable";
+    return 0;
+  }
+  nd.uid = doc["uid"] | 0u;
+  nd.rev = doc["rev"] | 1;
+  fixturesLock();
+  FixtureDef* local = findDefByUid(nd.uid);
+  uint16_t id = 0;
+  if (local) {
+    id = local->id;
+    bool newer = revNewer(nd.rev, local->rev) || (nd.rev == local->rev && defCrc(nd) != defCrc(*local) && src < boxId);
+    if (newer) {
+      nd.id = local->id;
+      err = saveDef(nd, true);
+    }
+  } else {
+    err = saveDef(nd, true);
+    id = err.isEmpty() ? nd.id : 0;
+  }
+  fixturesUnlock();
+  return id;
+}
+
+static void processDefPulls(uint32_t now) {
+  if (activePull.box && now - activePullMs > DEF_PULL_TIMEOUT_MS) activePull = {0, 0};
+  if (activePull.box || defPulls.empty()) return;
+  for (size_t i = 0; i < defPulls.size(); i++) {
+    BoxState* b = findBox(defPulls[i].box);
+    if (!b || !b->box.peer.online()) continue;
+    activePull = defPulls[i];
+    activePullMs = now;
+    defPulls.erase(defPulls.begin() + i);
+    std::vector<uint8_t> r;
+    put<uint16_t>(r, activePull.box);
+    put<uint32_t>(r, activePull.uid);
+    queuePacket(PT_DEF_REQ, r);
+    return;
+  }
+  defPulls.clear();  // all sources offline: asked again at the next comparison
 }
 
 static void requestDesc(BoxState& b, uint32_t mask) {
@@ -688,9 +910,12 @@ static void handleDescChunk(BoxState& b, uint16_t src, uint16_t version, uint16_
 
   std::vector<RemoteFixture> fx;
   std::vector<RemoteDef> defs;
-  if (parseDesc(a.buf, fx, defs)) {
+  std::vector<RemoteTomb> tombs;
+  if (parseDesc(a.buf, fx, defs, tombs)) {
     b.box.fixtures = fx;
     b.box.defs = defs;
+    b.box.tombs = tombs;
+    reconcileDefs(b);
     b.box.described = true;
     b.describedVersion = version;
     b.box.version = version;
@@ -703,6 +928,94 @@ static void handleDescChunk(BoxState& b, uint16_t src, uint16_t version, uint16_
   }
   b.box.loading = false;
   a = DescAssembly();
+}
+
+// ---------- show metadata and play state ----------
+
+// Caller holds the lock.
+static uint16_t leaderId() {
+  uint16_t id = boxId;
+  for (const BoxState& b : boxes) if (b.box.peer.online() && b.box.peer.id < id) id = b.box.peer.id;
+  return id;
+}
+
+static bool showNewer(uint16_t src, uint16_t ver, uint32_t crc) {
+  uint16_t mine = cuesShowVersion();
+  if (ver != mine) return (int16_t)(ver - mine) > 0;
+  return crc != cuesShowCrc() && src < boxId;  // same version, different content: the lower box id wins
+}
+
+static void requestShow(uint16_t src, uint16_t ver, uint32_t mask) {
+  std::vector<uint8_t> r;
+  put<uint16_t>(r, src);
+  put<uint16_t>(r, ver);
+  put<uint32_t>(r, mask);
+  queuePacket(PT_SHOW_REQ, r);
+}
+
+static void handleShowBeacon(uint16_t src, uint16_t showVer, uint32_t showCrc, uint16_t playSeq, uint16_t playCue,
+                             uint8_t playMode, uint32_t playMs, uint16_t playEpoch) {
+  cuesNoteShowVersion(showVer);
+  if (showNewer(src, showVer, showCrc)) {
+    bool busy = showAsm.src == src && showAsm.ver == showVer && millis() - showAsm.lastMs < 5000;
+    if (!busy) {
+      showAsm = ShowAssembly();
+      showAsm.src = src;
+      showAsm.ver = showVer;
+      showAsm.lastMs = millis();
+      requestShow(src, showVer, 0xFFFFFFFF);
+    }
+    return;
+  }
+  // once both have the same show: adopt a newer play state, or the leader's timing
+  if (showVer == cuesShowVersion() && showCrc == cuesShowCrc()) {
+    cuesAlign(playSeq, playCue, playMode, playMs + BEACON_AIRTIME_MS, playEpoch, src == leaderId());
+  }
+}
+
+static void handleShowChunk(uint16_t src, uint16_t ver, uint16_t total, uint8_t index, const uint8_t* p, size_t dlen) {
+  cuesNoteShowVersion(ver);
+  if (index >= MAX_CHUNKS || (size_t)index * CHUNK + dlen > total) return;
+  if (showAsm.src != src || showAsm.ver != ver || showAsm.total != total || showAsm.buf.size() != total) {
+    if (!showNewer(src, ver, 0)) {
+      // only a newer version (or one we asked for) is assembled
+      if (!(showAsm.src == src && showAsm.ver == ver)) return;
+    }
+    showAsm = ShowAssembly();
+    showAsm.src = src;
+    showAsm.ver = ver;
+    showAsm.total = total;
+    showAsm.buf.assign(total, 0);
+  }
+  if (dlen) memcpy(showAsm.buf.data() + (size_t)index * CHUNK, p, dlen);
+  showAsm.mask |= 1UL << index;
+  showAsm.lastMs = millis();
+  uint32_t full = chunkMask(total);
+  if ((showAsm.mask & full) != full) return;
+  bool ok = cuesApplyShowBlob(showAsm.buf.data(), showAsm.buf.size());
+  Serial.printf("Link: show v%u from %04x %s\n", ver, src, ok ? "applied" : "unreadable");
+  if (ok) showVerApplied = true;
+  showAsm = ShowAssembly();
+}
+
+static void queueShowChunk(size_t index) {
+  std::vector<uint8_t> b;
+  put<uint16_t>(b, showBlobVer);
+  put<uint16_t>(b, (uint16_t)showBlob.size());
+  put<uint8_t>(b, (uint8_t)index);
+  size_t start = index * CHUNK;
+  size_t stop = min(showBlob.size(), start + CHUNK);
+  if (start < stop) b.insert(b.end(), showBlob.begin() + start, showBlob.begin() + stop);
+  queuePacket(PT_SHOW, b);
+}
+
+static void sendMarks() {
+  uint8_t bm[64];
+  cuesMarksBitmap(bm);
+  std::vector<uint8_t> b;
+  put<uint16_t>(b, cuesMarkCount());
+  b.insert(b.end(), bm, bm + 64);
+  queuePacket(PT_MARKS, b);
 }
 
 static void handlePacket(const uint8_t* buf, size_t len, float rssi, float snr) {
@@ -731,6 +1044,13 @@ static void handlePacket(const uint8_t* buf, size_t len, float rssi, float snr) 
     case PT_BEACON: {
       if (!get(p, end, peer.fixVersion) || !get(p, end, peer.fixCount) || !get(p, end, peer.uptimeS) ||
           !getStr(p, end, peer.name)) return;
+      uint16_t showVer, playSeq, playCue, playEpoch;
+      uint32_t showCrc, playMs;
+      uint8_t playMode;
+      if (get(p, end, showVer) && get(p, end, showCrc) && get(p, end, playSeq) && get(p, end, playCue) &&
+          get(p, end, playMode) && get(p, end, playMs) && get(p, end, playEpoch)) {
+        handleShowBeacon(h.src, showVer, showCrc, playSeq, playCue, playMode, playMs, playEpoch);
+      }
       if (!wasOnline) {
         Serial.printf("Link: peer %04x '%s' online (RSSI %.0f, SNR %.1f)\n", h.src, peer.name.c_str(), rssi, snr);
         beaconRequested = true;
@@ -822,6 +1142,7 @@ static void handlePacket(const uint8_t* buf, size_t len, float rssi, float snr) 
         data[addr] = v;
         lastSent[addr] = ~v;  // force a VALUES reply as confirmation, even if unchanged
         presetChannelsChanged(addr, addr);
+        cuesManualChange(addr, addr);
       }
       valuesCheckNow = true;
       break;
@@ -845,7 +1166,7 @@ static void handlePacket(const uint8_t* buf, size_t len, float rssi, float snr) 
       if (!get(p, end, target) || target != boxId || !get(p, end, nonce) || !get(p, end, op) ||
           !get(p, end, fixtureId) || !get(p, end, group) || !get(p, end, presetId) || !getStr(p, end, name) ||
           !get(p, end, address) || !get(p, end, defId) || !get(p, end, count)) return;
-      String err;
+      String err, reply;
       uint16_t src = h.src;
       bool dup = std::find(doneCmds.begin(), doneCmds.end(), std::make_pair(src, nonce)) != doneCmds.end();
       if (!dup) {
@@ -876,21 +1197,46 @@ static void handlePacket(const uint8_t* buf, size_t len, float rssi, float snr) 
             err = deleteFixture(fixtureId);
             if (err.isEmpty()) presetsFixtureDeleted(fixtureId);
             break;
-          case CMD_SNAPSHOT_SAVE: snapshotSave(); break;
-          case CMD_SNAPSHOT_RESET: snapshotReset(); break;
+          case CMD_CUE_STORE:
+            reply = String(cuesStorePart(fixtureId, presetId, group != 0, count));
+            break;
+          case CMD_TRANSPORT: {
+            // a late retry must not undo a newer transport from the same box
+            auto it = std::find_if(lastTransport.begin(), lastTransport.end(),
+                                   [&](const LastTransport& e) { return e.src == src; });
+            uint32_t nowMs = millis();
+            if (it != lastTransport.end() && nowMs - it->ms < TRANSPORT_ORDER_MS && (int16_t)(nonce - it->nonce) < 0) break;
+            if (it != lastTransport.end()) *it = {src, nonce, nowMs};
+            else lastTransport.push_back({src, nonce, nowMs});
+            CueTransport t;
+            t.seq = fixtureId;
+            t.cue = presetId;
+            t.mode = group;
+            t.move = address;
+            t.epoch = count;
+            cuesApplyTransport(t);
+            break;
+          }
           default: err = "Unknown action";
         }
         doneCmds.push_back({src, nonce});
         if (doneCmds.size() > 32) doneCmds.erase(doneCmds.begin());
+        if (op == CMD_CUE_STORE) storedReplies.push_back({{src, nonce}, reply});
+        if (storedReplies.size() > 8) storedReplies.erase(storedReplies.begin());
         Serial.printf("Link: command %u from %04x: %s\n", op, h.src, err.isEmpty() ? "ok" : err.c_str());
+        // a cue or sequence we do not know yet: fetch the sender's show right away
+        if ((op == CMD_CUE_STORE || op == CMD_TRANSPORT) && cuesNeedsShow()) requestShow(src, 0, 0xFFFFFFFF);
         // changed values go out before the ACK, so the sender has them when it sees the confirmation
         sendValues(false);
+      }
+      if (dup && op == CMD_CUE_STORE) {
+        for (const auto& e : storedReplies) if (e.first == std::make_pair(src, nonce)) reply = e.second;
       }
       std::vector<uint8_t> r;
       put<uint16_t>(r, h.src);
       put<uint16_t>(r, nonce);
       put<uint8_t>(r, err.isEmpty() ? 1 : 0);
-      putStr(r, err, 120);
+      putStr(r, err.isEmpty() ? reply : err, 120);
       // list version after the command: the sender fetches the new list right away instead of
       // relying on the (single, losable) beacon
       put<uint16_t>(r, fixturesVersion());
@@ -914,16 +1260,25 @@ static void handlePacket(const uint8_t* buf, size_t len, float rssi, float snr) 
       uint8_t ok;
       String msg;
       if (!get(p, end, target) || target != boxId || !get(p, end, nonce) || !get(p, end, ok) || !getStr(p, end, msg)) return;
+      bool cueOp = false;
       for (const PendingCmd& c : pendingCmds) {
-        if (c.box == h.src && c.nonce == nonce && (c.op == CMD_SNAPSHOT_SAVE || c.op == CMD_SNAPSHOT_RESET)) {
-          snapshotResult(c.box, ok);
-        }
+        if (c.box != h.src || c.nonce != nonce) continue;
+        cueOp = c.op == CMD_CUE_STORE || c.op == CMD_TRANSPORT;
+        if (c.op == CMD_CUE_STORE) storeResult(c.box, ok, msg.toInt());
       }
       pendingCmds.erase(std::remove_if(pendingCmds.begin(), pendingCmds.end(),
                                        [&](const PendingCmd& c) { return c.box == h.src && c.nonce == nonce; }),
                         pendingCmds.end());
-      b.box.lastError = ok ? String("") : msg;
-      b.box.lastErrorMs = millis();
+      // an error is only cleared by the success of a later command (not by a late retry of an earlier
+      // one, and not by the frequent cue confirmations)
+      if (!ok) {
+        b.box.lastError = msg;
+        b.box.lastErrorMs = millis();
+        b.errorNonce = nonce;
+      } else if (!cueOp && (b.box.lastError.isEmpty() || (int16_t)(nonce - b.errorNonce) > 0)) {
+        b.box.lastError = "";
+        b.box.lastErrorMs = millis();
+      }
       uint16_t listVersion;
       if (get(p, end, listVersion)) {
         bool outdated = !b.box.described || listVersion != b.describedVersion;
@@ -945,6 +1300,50 @@ static void handlePacket(const uint8_t* buf, size_t len, float rssi, float snr) 
                    refs.end());
         refs.insert(refs.end(), fresh.begin(), fresh.end());
       }
+      break;
+    }
+    case PT_SHOW: {
+      uint16_t ver, total;
+      uint8_t index;
+      if (!get(p, end, ver) || !get(p, end, total) || !get(p, end, index)) return;
+      handleShowChunk(h.src, ver, total, index, p, end - p);
+      break;
+    }
+    case PT_SHOW_REQ: {
+      uint16_t target, ver;
+      uint32_t mask;
+      if (!get(p, end, target) || target != boxId || !get(p, end, ver) || !get(p, end, mask)) return;
+      if (ver != showBlobVer) mask = 0xFFFFFFFF;
+      showSendMask |= mask & chunkMask(showBlob.size());
+      break;
+    }
+    case PT_MARKS: {
+      uint16_t n;
+      if (!get(p, end, n) || p + 64 > end) return;
+      b.box.markCount = n;
+      memcpy(b.box.marks, p, 64);
+      break;
+    }
+    case PT_DEF_REQ: {
+      uint16_t target;
+      uint32_t uid;
+      if (!get(p, end, target) || target != boxId || !get(p, end, uid)) return;
+      bool busy = false;
+      for (const DefPush& dp : defPushes) busy |= dp.box == h.src && dp.uid == uid;
+      if (busy) break;
+      fixturesLock();
+      FixtureDef* d = findDefByUid(uid);
+      std::vector<uint8_t> json;
+      if (d) json = defTransferJson(*d);
+      fixturesUnlock();
+      if (json.empty()) break;
+      DefPush dp;
+      dp.box = h.src;
+      dp.xfer = nextNonce++;
+      dp.uid = uid;
+      dp.json = json;
+      dp.then.op = 0;
+      defPushes.push_back(dp);
       break;
     }
     case PT_DEF_PUSH: {
@@ -971,18 +1370,22 @@ static void handlePacket(const uint8_t* buf, size_t len, float rssi, float snr) 
         if (dlen) memcpy(a->buf.data() + start, p, dlen);
         a->mask |= 1UL << index;
         if ((a->mask & chunkMask(a->total)) != chunkMask(a->total)) return;
-        // complete: reuse an identical definition, otherwise import it
-        uint32_t crc = esp_rom_crc32_le(0, a->buf.data(), a->buf.size());
-        fixturesLock();
-        FixtureDef* same = findDefByCrc(crc);
-        if (same) {
-          a->defId = same->id;
+        // complete: link-wide definitions (with uid) are matched by uid; older senders by content
+        JsonDocument doc;
+        if (deserializeJson(doc, (const char*)a->buf.data(), a->buf.size())) {
+          a->err = "Definition unreadable";
+        } else if (doc["uid"].is<uint32_t>()) {
+          a->defId = upsertDef(doc, src, a->err);
+          uint32_t uid = doc["uid"] | 0u;
+          if (activePull.box == src && activePull.uid == uid) activePull = {0, 0};
         } else {
-          JsonDocument doc;
-          if (deserializeJson(doc, (const char*)a->buf.data(), a->buf.size())) a->err = "Definition unreadable";
+          uint32_t crc = esp_rom_crc32_le(0, a->buf.data(), a->buf.size());
+          fixturesLock();
+          FixtureDef* same = findDefByCrc(crc);
+          if (same) a->defId = same->id;
           else a->defId = importSingleDef(doc.as<JsonVariantConst>(), a->err);
+          fixturesUnlock();
         }
-        fixturesUnlock();
         a->done = true;
         Serial.printf("Link: definition from %04x -> id %u %s\n", src, a->defId, a->err.c_str());
       }
@@ -1003,11 +1406,11 @@ static void handlePacket(const uint8_t* buf, size_t len, float rssi, float snr) 
           !getStr(p, end, msg)) return;
       for (size_t i = 0; i < defPushes.size(); i++) {
         if (defPushes[i].box != h.src || defPushes[i].xfer != xfer) continue;
-        if (ok) {
+        if (ok && defPushes[i].then.op) {
           PendingCmd c = defPushes[i].then;
           c.defId = defId;
           pendingCmds.push_back(c);
-        } else {
+        } else if (!ok && defPushes[i].then.op) {
           b.box.lastError = msg;
           b.box.lastErrorMs = millis();
         }
@@ -1065,14 +1468,15 @@ static void processPendingSets(uint32_t now) {
 
 static void processPendingCmds(uint32_t now) {
   for (PendingCmd& c : pendingCmds) {
-    if (c.attempts > 0 && now - c.lastSendMs < CMD_RETRY_MS) continue;
+    // jittered, so that retries do not keep colliding with periodic traffic
+    if (c.attempts > 0 && now - c.lastSendMs < CMD_RETRY_MS + (c.nonce * 37u) % 500) continue;
     BoxState* b = findBox(c.box);
     if (c.attempts >= CMD_MAX_ATTEMPTS || !b || !b->box.peer.online()) {
       if (b) {
         b->box.lastError = "no answer";
         b->box.lastErrorMs = now;
       }
-      if (c.op == CMD_SNAPSHOT_SAVE || c.op == CMD_SNAPSHOT_RESET) snapshotResult(c.box, false);
+      if (c.op == CMD_CUE_STORE) storeResult(c.box, false, 0);
       c.attempts = 0xFF;
       continue;
     }
@@ -1134,6 +1538,14 @@ static void buildBeacon() {
   put<uint8_t>(b, descBlob.empty() ? 0 : descBlob[0]);
   put<uint32_t>(b, millis() / 1000);
   putStr(b, settings.name, 32);
+  PlayInfo pi = cuesPlayInfo();
+  put<uint16_t>(b, cuesShowVersion());
+  put<uint32_t>(b, cuesShowCrc());
+  put<uint16_t>(b, pi.seq);
+  put<uint16_t>(b, pi.cue);
+  put<uint8_t>(b, pi.mode);
+  put<uint32_t>(b, pi.ms);
+  put<uint16_t>(b, pi.epoch);
   queuePacket(PT_BEACON, b);
 }
 
@@ -1145,6 +1557,7 @@ void syncBegin(const char* defaultName) {
   applySettings();
   if (settings.enabled) transport->begin();
   randomSeed(esp_random());
+  nextNonce = esp_random();  // command nonces of the previous run are still remembered by the others
   nextBeaconMs = millis() + random(2000, 4000);
   Serial.printf("Link: box %04x '%s', %s\n", boxId, settings.name.c_str(),
                 transport->ready() ? "radio ok" : "radio off");
@@ -1152,6 +1565,7 @@ void syncBegin(const char* defaultName) {
 
 void syncLoop() {
   if (!transport->ready()) return;
+
   uint8_t buf[LINK_MAX_PACKET];
   float rssi, snr;
   size_t len = transport->poll(buf, sizeof(buf), rssi, snr);
@@ -1189,6 +1603,14 @@ void syncLoop() {
     queuePacket(PT_PING, b);
   }
 
+  if (valuesRepeatAt && (int32_t)(now - valuesRepeatAt) >= 0) {
+    valuesRepeatAt = 0;
+    for (uint16_t a = 1; a <= 512; a++) {
+      if (repeatAddr[a]) lastSent[a] = ~data[a];
+    }
+    memset(repeatAddr, 0, sizeof(repeatAddr));
+    if (anyPeerOnline()) sendValues(false, true);
+  }
   if (valuesCheckNow || now - lastValuesCheckMs >= VALUES_CHECK_MS) {
     bool force = valuesCheckNow;
     valuesCheckNow = false;
@@ -1200,7 +1622,10 @@ void syncLoop() {
         nextFullRefreshMs = now + VALUES_REFRESH_MS;
       }
       sendValues(all);
-      if (all) refsSendPending = true;
+      if (all) {
+        refsSendPending = true;
+        marksSendPending = true;
+      }
     }
   }
   // references go out twice: a single packet can collide with the fixture list transfer that
@@ -1219,7 +1644,45 @@ void syncLoop() {
     refsSendPending = false;
     sendRefs();
   }
+  // show metadata: rebuild the blob on every change, broadcast it when the change was made here
+  uint16_t sv = cuesShowVersion();
+  if (sv != lastShowVer) {
+    lastShowVer = sv;
+    String blob = cuesShowBlob();
+    showBlob.assign(blob.c_str(), blob.c_str() + blob.length());
+    showBlobVer = sv;
+    showSendMask = 0;
+    if (!showVerApplied && anyPeerOnline()) {
+      showSendMask = chunkMask(showBlob.size());
+      beaconRepeatAt = now + 2500;  // carries the new version for boxes that missed a chunk
+    }
+    showVerApplied = false;
+  }
+  CueTransport hold;
+  if (cuesTakeHoldEvent(hold)) queueCmdToAll(CMD_TRANSPORT, hold.seq, hold.mode, hold.cue, hold.move, hold.epoch);
+  // marks go out twice, like references: a single packet can be lost
+  static uint32_t marksRepeatAt = 0;
+  if (cuesMarksVersion() != lastMarksVer) {
+    marksSendPending = true;
+    marksRepeatAt = now + 2500;
+  }
+  if (marksRepeatAt && (int32_t)(now - marksRepeatAt) >= 0) {
+    marksRepeatAt = 0;
+    marksSendPending = true;
+  }
+  if (marksSendPending && now - lastMarksSentMs >= MARKS_MIN_INTERVAL_MS && anyPeerOnline()) {
+    marksSendPending = false;
+    lastMarksVer = cuesMarksVersion();
+    lastMarksSentMs = now;
+    sendMarks();
+  }
   processPendingCmds(now);
+  static uint32_t lastReconcileMs = 0;
+  if (now - lastReconcileMs >= DEF_RECONCILE_MS) {
+    lastReconcileMs = now;
+    for (BoxState& b : boxes) if (b.box.peer.online()) reconcileDefs(b);
+  }
+  processDefPulls(now);
 
   processPendingSets(now);
   processDescRetries(now);
@@ -1230,7 +1693,7 @@ void syncLoop() {
     if (dp.sendMask || (dp.attempts && now - dp.lastSendMs < DEF_PUSH_RETRY_MS)) continue;
     BoxState* b = findBox(dp.box);
     if (dp.attempts >= DEF_PUSH_MAX_ATTEMPTS || !b || !b->box.peer.online()) {
-      if (b) {
+      if (b && dp.then.op) {
         b->box.lastError = "definition transfer failed";
         b->box.lastErrorMs = now;
       }
@@ -1256,6 +1719,16 @@ void syncLoop() {
       queuePacket(PT_DEF_PUSH, pkt);
       if (!dp.sendMask) dp.lastSendMs = now;
       break;
+    }
+  }
+
+  if (showSendMask && txQueue.empty()) {
+    for (size_t i = 0; i < MAX_CHUNKS; i++) {
+      if (showSendMask & (1UL << i)) {
+        showSendMask &= ~(1UL << i);
+        queueShowChunk(i);
+        break;
+      }
     }
   }
 

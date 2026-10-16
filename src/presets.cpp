@@ -1,12 +1,20 @@
 #include "presets.h"
+#include "cues.h"
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <algorithm>
+#include <sys/stat.h>
 
 extern uint8_t data[];
 
 static const char* PRESETS_FILE = "/presets.json";
 static const char* REFS_FILE = "/presetrefs.json";
+
+// LittleFS.exists() logs an error for a missing file in this core version
+static bool refsFileExists() {
+  struct stat st;
+  return stat((String("/littlefs") + REFS_FILE).c_str(), &st) == 0;
+}
 
 static std::vector<Preset> presets;
 static std::vector<PresetRef> refs;
@@ -57,26 +65,32 @@ static bool savePresets() {
   return writeFile(PRESETS_FILE, doc);
 }
 
-// References changed in RAM; the file is only written with the snapshot (Save).
+// References live in RAM only; cues store and restore them.
 static void saveRefs() { refsVersion++; }
 
-void presetsSnapshotSave() {
+void presetsSetRefs(const std::vector<PresetRef>& r) {
   Guard g;
-  JsonDocument doc;
-  JsonArray arr = doc.to<JsonArray>();
-  for (const PresetRef& r : refs) {
-    JsonArray e = arr.add<JsonArray>();
-    e.add(r.fixtureId);
-    e.add(r.group);
-    e.add(r.presetId);
-  }
-  writeFile(REFS_FILE, doc);
+  refs = r;
+  refsVersion++;
 }
 
-void presetsClearRefs() {
+bool presetValuesFor(uint16_t fixtureId, uint16_t presetId, std::vector<std::pair<uint16_t, uint8_t>>& out) {
   Guard g;
-  refs.clear();
-  refsVersion++;
+  Fixture* f = findFixture(fixtureId);
+  Preset* p = nullptr;
+  for (Preset& q : presets) if (q.id == presetId) p = &q;
+  if (!f || !p) return false;
+  auto it = p->values.find(presetKey(*f, p->group));
+  if (it == p->values.end()) return false;
+  out = it->second;
+  return true;
+}
+
+std::vector<PresetRef> presetsTakeLegacyRefs() {
+  Guard g;
+  std::vector<PresetRef> out = refs;
+  if (refsFileExists()) LittleFS.remove(REFS_FILE);
+  return out;
 }
 
 void presetsLoad() {
@@ -107,7 +121,7 @@ void presetsLoad() {
     }
     f.close();
   }
-  File rf = LittleFS.open(REFS_FILE, "r");
+  File rf = refsFileExists() ? LittleFS.open(REFS_FILE, "r") : File();
   if (rf) {
     JsonDocument doc;
     if (!deserializeJson(doc, rf)) {
@@ -117,7 +131,7 @@ void presetsLoad() {
     }
     rf.close();
   }
-  // the snapshot stores references, not values: bring the referenced presets back live
+  // references from the old snapshot (before cues): applied once, then migrated into a cue
   for (const PresetRef& r : refs) {
     Fixture* f = findFixture(r.fixtureId);
     Preset* p = nullptr;
@@ -187,6 +201,14 @@ static void setRef(uint16_t fixtureId, uint8_t group, uint16_t presetId) {
   saveRefs();
 }
 
+// A preset action counts as a manual change of the group's channels (cue tracking).
+static void markGroup(const Fixture& f, uint8_t group) {
+  std::vector<uint8_t> groups = fixtureGroups(f);
+  for (uint16_t i = 0; i < groups.size(); i++) {
+    if (groups[i] == group) cuesManualChange(f.address + i, f.address + i);
+  }
+}
+
 static void applyValues(const Fixture& f, const std::vector<std::pair<uint16_t, uint8_t>>& vals) {
   uint16_t n = fixtureChannelCount(f);
   portENTER_CRITICAL(&dmxDataMux);
@@ -228,6 +250,7 @@ String presetCreate(uint16_t fixtureId, uint8_t group, const String& name) {
   presets.push_back(p);
   if (!savePresets()) return "Saving failed";
   setRef(f->id, group, p.id);
+  markGroup(*f, group);
   return "";
 }
 
@@ -242,6 +265,7 @@ String presetStore(uint16_t fixtureId, uint16_t presetId) {
   p->values[key] = vals;
   if (!savePresets()) return "Saving failed";
   setRef(f->id, p->group, p->id);
+  markGroup(*f, p->group);
   // live update of every fixture that follows this preset with the same key
   for (const PresetRef& r : refs) {
     if (r.presetId != p->id || r.fixtureId == f->id) continue;
@@ -260,6 +284,7 @@ String presetRecall(uint16_t fixtureId, uint16_t presetId) {
   if (it == p->values.end()) return "Preset '" + p->name + "' is not stored for this fixture";
   applyValues(*f, it->second);
   setRef(f->id, p->group, p->id);
+  markGroup(*f, p->group);
   return "";
 }
 

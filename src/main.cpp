@@ -11,8 +11,10 @@
 #include "display.h"
 #include "fixtures.h"
 #include "presets.h"
+#include "cues.h"
 #include "system.h"
 #include "fixture_web.h"
+#include "cue_web.h"
 #ifdef HAS_LORA
 #include "sync.h"
 #include "sync_web.h"
@@ -321,9 +323,17 @@ uint8_t dmxWeekdayEndMinute[7] = {0, 0, 0, 0, 0, 0, 0};
 bool timeControlEnabled = false;
 
 
+bool localTimeNow(struct tm& t) {
+  // getLocalTime(&t, 0) skips the read whenever millis() ticks during the call
+  time_t now;
+  time(&now);
+  localtime_r(&now, &t);
+  return t.tm_year > (2016 - 1900);
+}
+
 String getFormattedTime() {
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo, 0)) {
+  if (!localTimeNow(timeinfo)) {
     return "Time not set";
   }
   
@@ -340,14 +350,14 @@ void initTime() {
     // Wait up to 5 seconds for time sync
     int timeout = 0;
     struct tm timeinfo;
-    while (!getLocalTime(&timeinfo, 0) && timeout < 10) {
+    while (!localTimeNow(timeinfo) && timeout < 10) {
       delay(500);
       Serial.print(".");
       timeout++;
       esp_task_wdt_reset();
     }
 
-    if (getLocalTime(&timeinfo, 0)) {
+    if (localTimeNow(timeinfo)) {
       timeInitialized = true;
       Serial.println("\nTime synchronized: " + getFormattedTime());
     } else {
@@ -362,7 +372,7 @@ bool isDMXActiveTime() {
   }
   
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo, 0)) {
+  if (!localTimeNow(timeinfo)) {
     return true;
   }
   
@@ -487,41 +497,8 @@ void copyDataToDMXBuffer() {
   }
 }
 
-void saveEEPROM() {
-  // Save all 512 DMX channels
-  for (int i = 1; i <= 512; i++) {  
-    EEPROM.write(EEPROM_DMX_START + i, data[i]);
-  }
-  EEPROM.commit();
-  Serial.println("All 512 DMX channels saved to EEPROM"); 
-}
-
 volatile bool restartRequested = false;
-void resetEEPROM();
-
-void snapshotSave() {
-  saveEEPROM();
-  presetsSnapshotSave();
-}
-
-void snapshotReset() {
-  presetsClearRefs();
-  resetEEPROM();
-  presetsSnapshotSave();
-}
-
-void resetEEPROM() {
-  Serial.println("Resetting EEPROM - Setting all DMX channels to 0...");
-  
-  // Reset all 512 DMX channels to 0
-  for (int i = 1; i <= 512; i++) {  
-    data[i] = 0;
-    EEPROM.write(EEPROM_DMX_START + i, 0);
-  }
-  
-  EEPROM.commit();
-  Serial.println("EEPROM reset complete - All DMX channels set to 0");
-}
+volatile uint16_t loopFps = 0;
 
 bool connectToWiFi(const char* ssid, const char* password, int maxAttempts = 20) {
   if (strlen(ssid) == 0) {
@@ -640,6 +617,7 @@ void setup(){
   Serial.begin(115200);
   delay(1000);
   Serial.println("\n\n=== DMX Box Starting ===");
+  Serial.printf("Reset reason: %d\n", (int)esp_reset_reason());
   displayInit();
   displayMessage("Starting...");
 
@@ -723,7 +701,7 @@ void setup(){
   pinMode(2, OUTPUT);  // GPIO2 is the LoRa PA enable on the Heltec V4
 #endif
 
-  // Load all 512 DMX channels from EEPROM
+  // DMX values in EEPROM are only read for the one-time migration of the old snapshot into a cue
   bool allErased = true;
   for (int i = 1; i <= 512; i++) {
     data[i] = EEPROM.read(EEPROM_DMX_START + i);
@@ -744,6 +722,7 @@ void setup(){
   
   fixturesLoad();
   presetsLoad();
+  cuesBegin();
 #ifdef HAS_LORA
   syncBegin(ssid);
 #endif
@@ -756,6 +735,7 @@ void setup(){
 #endif
 
   registerSystemRoutes(server);
+  registerCueRoutes(server);
 
   server.addHandler(new CaptiveRequestHandler()).setFilter(ON_AP_FILTER);//only when requested from AP
 
@@ -786,6 +766,7 @@ void loop(){
     dnsServer.processNextRequest();
   }
   
+  cuesTick();
   copyDataToDMXBuffer();
   
   dmx_wait_sent(dmxPort, DMX_TIMEOUT_TICK);
@@ -822,8 +803,9 @@ void loop(){
     st.dmxReady = dmxReady;
     st.dmxActive = isDMXActiveTime();
     st.fps = (loopCounter - framesAtLastDisplay) * 1000 / (now - lastDisplayUpdate);
+    loopFps = st.fps;
     struct tm t;
-    st.timeValid = timeInitialized && getLocalTime(&t, 0);
+    st.timeValid = timeInitialized && localTimeNow(t);
     if (st.timeValid) {
       char buf[9];
       strftime(buf, sizeof(buf), "%H:%M:%S", &t);
@@ -833,6 +815,7 @@ void loop(){
 #ifdef HAS_LORA
     st.linkPeers = syncOnlinePeers();
 #endif
+    st.boxName = localBoxName();
     displayUpdate(st);
     framesAtLastDisplay = loopCounter;
     lastDisplayUpdate = now;

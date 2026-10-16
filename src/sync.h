@@ -2,6 +2,7 @@
 #ifdef HAS_LORA
 #include <Arduino.h>
 #include <vector>
+#include "cues.h"
 
 struct PeerInfo {
   uint16_t id = 0;
@@ -28,6 +29,13 @@ struct RemoteDef {
   uint32_t crc;  // see defCrc(): equal CRC = identical definition
   uint16_t channels;
   String name;
+  uint32_t uid = 0;  // link-wide identity, see FixtureDef
+  uint16_t rev = 0;
+};
+
+struct RemoteTomb {
+  uint32_t uid;
+  uint16_t rev;
 };
 
 struct RemoteFixture {
@@ -50,13 +58,13 @@ struct RemoteRef {
 
 enum PresetOp : uint8_t { PRESET_RECALL = 1, PRESET_STORE, PRESET_CREATE, PRESET_RENAME, PRESET_DELETE };
 
-// Result of the last Save/Reset that went to all boxes.
-struct SnapshotStatus {
+// Result of the last cue store that went to all boxes.
+struct CueStoreStatus {
   bool active = false;  // false: nothing in the last minute
-  bool reset = false;
   int total = 0;        // boxes incl. this one
   int ok = 0;
   int pending = 0;
+  std::vector<std::pair<String, int>> counts;  // box name, stored channels (this box first)
   std::vector<String> failed;
 };
 
@@ -66,6 +74,7 @@ struct RemoteBox {
   bool loading = false;         // fixture list transfer in progress
   std::vector<RemoteFixture> fixtures;
   std::vector<RemoteDef> defs;
+  std::vector<RemoteTomb> tombs;  // definitions deleted on that box
   uint8_t values[513] = {};     // last known DMX values (index = DMX address)
   bool haveValues = false;
   uint32_t valuesMs = 0;
@@ -75,6 +84,8 @@ struct RemoteBox {
   String lastError;                                   // last command error reported by that box
   uint32_t lastErrorMs = 0;
   uint16_t version = 0;                               // fixture list version (changes with presets too)
+  uint8_t marks[64] = {};                             // channels changed by hand since the last cue change
+  uint16_t markCount = 0;
 };
 
 struct LinkSettings {
@@ -102,12 +113,15 @@ int syncOnlinePeers();
 void syncRemoteFixtureSave(uint16_t box, uint16_t fixtureId, const String& name, uint16_t address,
                            uint16_t remoteDefId, int pushLocalDef, uint16_t count);
 void syncRemoteFixtureDelete(uint16_t box, uint16_t fixtureId);
+// Fixtures on other boxes that use the definition with this uid ("Spot (dmxbox-d4d4), ..."), "" if none.
+String syncDefUsedBy(uint32_t uid);
 
-// Save/Reset on this box and all online boxes.
 // Commands (incl. definition transfers) to a box that are not confirmed yet; box 0 = all boxes.
 int syncPendingFor(uint16_t box);
 
-void syncSnapshotAll(bool reset);
-SnapshotStatus syncSnapshotStatus();
+// Cues: a transport state or a store done on this box, sent to all online boxes.
+void syncTransport(const CueTransport& t);
+void syncCueStore(const CueStoreResult& r);
+CueStoreStatus syncCueStoreStatus();
 void syncPing();
 #endif

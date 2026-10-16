@@ -5,6 +5,11 @@
 void registerFixtureRoutes(AsyncWebServer& server);
 void sendFixturesPage(AsyncWebServerRequest* request);
 
+// Static CSS/JS served straight from flash, with a content hash in the URL so that the browser can
+// cache it for good (pages stay small and are built in less RAM). <script>/<style> wrappers are stripped.
+void registerAsset(AsyncWebServer& server, const char* path, const char* type, const char* text);
+String assetUrl(const char* path);
+
 // shared page helpers
 String esc(const String& s);
 bool hasArg(AsyncWebServerRequest* r, const char* name);

@@ -55,10 +55,18 @@ std::vector<int16_t> finePairsFromNames(const std::vector<String>& names);
 std::vector<FixtureControl> controlsFromFine(const std::vector<int16_t>& fine);
 
 struct FixtureDef {
-  uint16_t id = 0;
+  uint16_t id = 0;  // local to this box
   String name;
   String manufacturer;
   std::vector<ChannelDef> channels;
+  uint32_t uid = 0;  // the same on all linked boxes
+  uint16_t rev = 0;  // raised on every change; the highest revision wins on all boxes
+};
+
+// A deleted definition: remembered so that the deletion reaches all boxes.
+struct DefTombstone {
+  uint32_t uid;
+  uint16_t rev;
 };
 
 struct Fixture {
@@ -100,8 +108,17 @@ bool fixtureOverlaps(const Fixture& f);
 // Returns an empty string on success, otherwise an error message.
 String saveFixture(Fixture& f);  // f.id == 0 creates a new fixture
 String deleteFixture(uint16_t id);
-String saveDef(FixtureDef& d);   // d.id == 0 creates a new definition
-String deleteDef(uint16_t id);
+// d.id == 0 creates a new definition. Local changes get a new revision; fromLink keeps uid and rev
+// as received from another box.
+String saveDef(FixtureDef& d, bool fromLink = false);
+// tombRev 0: deleted here (revision + 1); otherwise the revision of a deletion received from another box.
+String deleteDef(uint16_t id, uint16_t tombRev = 0);
+FixtureDef* findDefByUid(uint32_t uid);
+std::vector<DefTombstone> defTombstones();
+int defTombstoneRev(uint32_t uid);  // -1 if none
+void defAddTombstone(uint32_t uid, uint16_t rev);
+// Content of a definition (name, manufacturer, channels) from the DmxBox JSON format.
+bool defFromJson(JsonVariantConst root, FixtureDef& d);
 
 void defToJson(const FixtureDef& d, JsonObject obj);
 // CRC32 over the JSON form: identical definitions on different boxes have the same value.

@@ -1,8 +1,10 @@
 #include "system.h"
 #include "fixture_web.h"
+#include "cues.h"
 #include <WiFi.h>
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include <esp_system.h>
 #ifdef HAS_LORA
 #include "sync.h"
 #include "sync_web.h"
@@ -25,7 +27,7 @@ String localBoxName() {
     File f = LittleFS.open("/box.json", "r");
     if (f) {
       JsonDocument doc;
-      if (!deserializeJson(doc, f)) storedBoxName = doc["name"] | "";
+      if (!deserializeJson(doc, f)) storedBoxName = migrateBoxName(doc["name"] | "");
       f.close();
     }
   }
@@ -51,6 +53,10 @@ String networkNameFor(const String& boxName) {
   return out;
 }
 
+String migrateBoxName(const String& name) {
+  return name.startsWith("dmxbox-heltec-") ? "dmxbox-" + name.substring(14) : name;
+}
+
 void applyStoredNetworkName() {
   // read the stored box name directly: the link/box settings are loaded later, after WiFi
   File f = LittleFS.open(
@@ -65,7 +71,7 @@ void applyStoredNetworkName() {
   bool ok = !deserializeJson(doc, f);
   f.close();
   if (!ok) return;
-  String net = networkNameFor(doc["name"] | "");
+  String net = networkNameFor(migrateBoxName(doc["name"] | ""));
   if (net.isEmpty()) return;
   static char buf[33];
   strlcpy(buf, net.c_str(), sizeof(buf));
@@ -110,6 +116,22 @@ static void handleBoxName(AsyncWebServerRequest* req) {
 
 // ---------------- status ----------------
 
+// Why the box started last time: a crash or watchdog shows up here after the automatic restart.
+static const char* resetReasonText() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON: return "power on";
+    case ESP_RST_SW: return "software restart";
+    case ESP_RST_PANIC: return "crash (exception)";
+    case ESP_RST_INT_WDT: return "crash (interrupt watchdog)";
+    case ESP_RST_TASK_WDT: return "crash (task watchdog)";
+    case ESP_RST_WDT: return "crash (watchdog)";
+    case ESP_RST_BROWNOUT: return "brownout (supply voltage)";
+    case ESP_RST_EXT: return "reset button";
+    case ESP_RST_DEEPSLEEP: return "deep sleep";
+    default: return "unknown";
+  }
+}
+
 static String hhmm(uint8_t h, uint8_t m) {
   char buf[6];
   snprintf(buf, sizeof(buf), "%02u:%02u", h, m);
@@ -119,14 +141,14 @@ static String hhmm(uint8_t h, uint8_t m) {
 static String scheduleText() {
   if (!timeControlEnabled) return "off (DMX always on)";
   struct tm t;
-  if (!timeInitialized || !getLocalTime(&t, 0)) return "on, waiting for time sync";
+  if (!timeInitialized || !localTimeNow(t)) return "on, waiting for time sync";
   int today = (t.tm_wday + 6) % 7;
   if (isDMXActiveTime()) return "active until " + hhmm(dmxWeekdayEndHour[today], dmxWeekdayEndMinute[today]);
   int now = t.tm_hour * 60 + t.tm_min;
   int start = dmxWeekdayStartHour[today] * 60 + dmxWeekdayStartMinute[today];
-  if (now < start) return "inactive, on at " + hhmm(dmxWeekdayStartHour[today], dmxWeekdayStartMinute[today]);
+  if (now < start) return "inactive, reactivation at " + hhmm(dmxWeekdayStartHour[today], dmxWeekdayStartMinute[today]);
   int tomorrow = (today + 1) % 7;
-  return "inactive, on " + String(DAY_NAMES[tomorrow]).substring(0, 3) + " " +
+  return "inactive, reactivation at " + String(DAY_NAMES[tomorrow]).substring(0, 3) + " " +
          hhmm(dmxWeekdayStartHour[tomorrow], dmxWeekdayStartMinute[tomorrow]);
 }
 
@@ -140,27 +162,26 @@ static void handleStatusApi(AsyncWebServerRequest* req) {
   w["rssi"] = sta ? WiFi.RSSI() : 0;
   w["clients"] = sta ? 0 : WiFi.softAPgetStationNum();
   struct tm t;
-  if (timeInitialized && getLocalTime(&t, 0)) {
+  if (timeInitialized && localTimeNow(t)) {
     char buf[6];
     strftime(buf, sizeof(buf), "%H:%M", &t);
     doc["time"] = buf;
   }
   doc["sched"] = scheduleText();
+  doc["fps"] = loopFps;
+  doc["reset"] = resetReasonText();
+  PlayInfo pi = cuesPlayInfo();
+  JsonObject play = doc["play"].to<JsonObject>();
+  play["seq"] = pi.seq;
+  play["cue"] = pi.cue;
+  play["idx"] = pi.idx;
+  play["mode"] = pi.mode == CUE_PLAY ? "play" : "hold";
+  play["marks"] = cuesMarkCount();
 #ifdef HAS_LORA
   LinkSettings ls = syncSettings();
   JsonObject l = doc["lora"].to<JsonObject>();
   l["enabled"] = ls.enabled;
   l["boxes"] = syncOnlinePeers() + 1;
-  SnapshotStatus ss = syncSnapshotStatus();
-  if (ss.active) {
-    JsonObject s = doc["snap"].to<JsonObject>();
-    s["reset"] = ss.reset;
-    s["total"] = ss.total;
-    s["ok"] = ss.ok;
-    s["pending"] = ss.pending;
-    JsonArray f = s["failed"].to<JsonArray>();
-    for (const String& n : ss.failed) f.add(n);
-  }
   JsonObject boxesJson = doc["boxes"].to<JsonObject>();
   for (const RemoteBox& b : syncRemoteBoxes()) boxesJson[String(b.peer.id)] = b.peer.online();
   JsonArray errors = doc["errors"].to<JsonArray>();
@@ -201,6 +222,7 @@ static void handleConnectivity(AsyncWebServerRequest* req) {
     if (strlen(savedSSID)) r->printf("<tr><th>Saved network</th><td>%s (not reachable)</td></tr>", esc(String(savedSSID)).c_str());
   }
   r->printf("<tr><th>Hostname</th><td class='mono'>%s.local</td></tr>", esc(String(ssid)).c_str());
+  r->printf("<tr><th>Last restart</th><td>%s, %lu min ago</td></tr>", resetReasonText(), millis() / 60000);
   r->printf("<tr><th>Time</th><td class='mono'>%s</td></tr></table></div>",
             timeInitialized ? getFormattedTime().c_str() : "not synchronised");
   r->print("<div class='row'><a class='btn' href='/wifisetup'>Scan networks</a></div>");
@@ -302,37 +324,6 @@ static void handleTimeSave(AsyncWebServerRequest* req) {
   req->redirect("/");
 }
 
-// ---------------- snapshot (save / reset) ----------------
-
-static void handleSnapshotSave(AsyncWebServerRequest* req) {
-#ifdef HAS_LORA
-  syncSnapshotAll(false);
-#else
-  snapshotSave();
-#endif
-  req->redirect("/");
-}
-
-static void handleSnapshotReset(AsyncWebServerRequest* req) {
-  if (req->method() == HTTP_POST) {
-#ifdef HAS_LORA
-    syncSnapshotAll(true);
-#else
-    snapshotReset();
-#endif
-    return req->redirect("/");
-  }
-  AsyncResponseStream* r = pageBegin(req, "Reset");
-  r->print("<h1>Reset?</h1><div class='panel'>Sets all DMX channels to 0 and clears the active presets");
-#ifdef HAS_LORA
-  r->print(" on this box and all linked boxes");
-#endif
-  r->print(". Fixtures, definitions and presets themselves are kept.</div>"
-           "<div class='row'><form method='post' action='/snapshot/reset'><button class='btn danger grow' type='submit'>Reset</button></form>"
-           "<a class='btn grow' href='/'>Cancel</a></div>");
-  pageEnd(req, r);
-}
-
 void registerSystemRoutes(AsyncWebServer& server) {
   server.on("/api/ping", HTTP_GET, [](AsyncWebServerRequest* req) { req->send(200, "text/plain", "ok"); });
   server.on("/api/status", HTTP_GET, handleStatusApi);
@@ -344,6 +335,4 @@ void registerSystemRoutes(AsyncWebServer& server) {
   server.on("/wificonnect", HTTP_ANY, handleWifiConnect);
   server.on("/timesetup", HTTP_GET, handleTimeSetup);
   server.on("/timesave", HTTP_ANY, handleTimeSave);
-  server.on("/snapshot/save", HTTP_POST, handleSnapshotSave);
-  server.on("/snapshot/reset", HTTP_ANY, handleSnapshotReset);
 }

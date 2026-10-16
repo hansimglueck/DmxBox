@@ -4,6 +4,7 @@
 #include "lora_link.h"
 #include "fixture_web.h"
 #include "fader_ui.h"
+#include "cue_web.h"
 #include <algorithm>
 
 static String ago(uint32_t ms) {
@@ -28,8 +29,10 @@ void renderLoraSection(AsyncResponseStream* r) {
     r->printf("<tr><th>Packets</th><td class='mono'>tx %u · rx %u · rx errors %u · dropped %u</td></tr>",
               loraLink.txCount, loraLink.rxCount, loraLink.rxErrors, loraLink.budgetDrops);
   }
-  r->printf("<tr><th>Uptime / memory</th><td class='mono'>%lu min · %u B free (min %u B)</td></tr></table></div>",
-            millis() / 60000, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+  r->printf("<tr><th>Uptime / memory</th><td class='mono'>%lu min · %u B free (min %u B)", millis() / 60000,
+            (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+  if (ESP.getPsramSize()) r->printf(" · PSRAM %u of %u kB free", (unsigned)(ESP.getFreePsram() / 1024), (unsigned)(ESP.getPsramSize() / 1024));
+  r->print("</td></tr></table></div>");
 
   std::vector<PeerInfo> peers = syncPeers();
   r->print("<div class='panel'><table><tr><th>Box</th><th>Status</th><th>Signal</th><th>Ping</th></tr>");
@@ -156,6 +159,19 @@ static String remoteValuesJson(const RemoteBox& box, const RemoteFixture& f, boo
   return s + "]";
 }
 
+static String remoteMarksJson(const RemoteBox& box, const RemoteFixture& f) {
+  String s = "[";
+  bool first = true;
+  for (uint16_t i = 0; i < f.count; i++) {
+    uint16_t a = f.address + i;
+    if (a < 1 || a > 512 || !(box.marks[(a - 1) >> 3] & (1 << ((a - 1) & 7)))) continue;
+    if (!first) s += ",";
+    s += String(i);
+    first = false;
+  }
+  return s + "]";
+}
+
 static String jsonEsc(const String& s) {
   String o;
   for (size_t i = 0; i < s.length(); i++) {
@@ -176,16 +192,27 @@ static void handleRemoteFixture(AsyncWebServerRequest* req) {
   RemoteBox box;
   const RemoteFixture* f;
   if (!loadRemote(req, box, f)) return req->redirect("/");
-  AsyncResponseStream* r = pageBegin(req, f->name, FADER_HEAD);
+  AsyncResponseStream* r = pageBegin(req, f->name, faderHead().c_str());
   r->printf("<div class='titlebar'><h1>%s</h1><span class='row'><a class='btn' href='/fixture/edit?box=%u&id=%u'>Edit</a>"
             "</span></div>", esc(f->name).c_str(), box.peer.id, f->id);
-  r->printf("<p class='meta'><span class='mono'>%s</span> · %s · %s</p>", dmxRangeLabel(f->address, f->count).c_str(),
-            esc(remoteTypeLabel(box, *f)).c_str(), esc(box.peer.name).c_str());
+  renderMiniPlayback(r);
   if (!box.haveValues) r->print("<p class='warn meta'>Values not received yet.</p>");
   r->printf("<p class='err meta boxoffmsg'>%s is offline, changes are not transmitted.</p>", esc(box.peer.name).c_str());
   if (!box.peer.online()) r->print("<script>document.body.classList.add('boxoff')</script>");
   if (!box.lastError.isEmpty()) r->printf("<p class='err meta'>%s reports: %s</p>", esc(box.peer.name).c_str(), esc(box.lastError).c_str());
   String q = "box=" + String(box.peer.id) + "&id=" + String(f->id);
+  // named ranges: from the identical definition on this box (same CRC), if there is one
+  std::vector<std::vector<ChannelRange>> ranges(f->count);
+  if (f->defId) {
+    for (const RemoteDef& rd : box.defs) {
+      if (rd.id != f->defId) continue;
+      fixturesLock();
+      if (const FixtureDef* d = findDefByCrc(rd.crc)) {
+        for (uint16_t i = 0; i < f->count && i < d->channels.size(); i++) ranges[i] = d->channels[i].ranges;
+      }
+      fixturesUnlock();
+    }
+  }
   std::vector<uint8_t> present = groupsPresent(f->groups);
   faderTabs(r, present);
   FaderGrid grid;
@@ -196,6 +223,7 @@ static void handleRemoteFixture(AsyncWebServerRequest* req) {
   grid.reloadDelayMs = 1500;
   grid.valuesJson = remoteValuesJson(box, *f, false);
   grid.refsJson = remoteRefsJson(box, *f);
+  grid.marksJson = remoteMarksJson(box, *f);
   grid.version = String(box.version);
   grid.box = box.peer.id;
   grid.boxName = box.peer.name;
@@ -204,7 +232,7 @@ static void handleRemoteFixture(AsyncWebServerRequest* req) {
     String name = c.ch < f->channelNames.size() ? f->channelNames[c.ch] : "Ch " + String(c.ch + 1);
     faderCard(r, name, "/remote/channel?" + q + "&ch=" + String(c.ch), c.ch, c.fine,
               c.ch < f->groups.size() ? f->groups[c.ch] : GROUP_CONTROL, f->address + c.ch,
-              c.fine >= 0 ? f->address + c.fine : -1, nullptr);
+              c.fine >= 0 ? f->address + c.fine : -1, ranges[c.ch].empty() ? nullptr : &ranges[c.ch]);
   }
   faderGridEnd(r);
   for (uint8_t g : present) {
@@ -212,8 +240,15 @@ static void handleRemoteFixture(AsyncWebServerRequest* req) {
     for (const RemotePreset& p : f->presets) {
       if (p.group == g) list.push_back({p.id, p.name, p.group, p.stored});
     }
-    faderPresetPanel(r, g, list, remoteActive(box, f->id, g));
+    std::vector<RangeChannel> rcs;
+    for (const FixtureControl& c : controlsFromFine(f->fine)) {
+      if (ranges[c.ch].empty() || c.ch >= f->groups.size() || f->groups[c.ch] != g) continue;
+      rcs.push_back({c.ch, c.fine, c.ch < f->channelNames.size() ? f->channelNames[c.ch] : "Ch " + String(c.ch + 1), &ranges[c.ch]});
+    }
+    faderPresetPanel(r, g, list, remoteActive(box, f->id, g), rcs);
   }
+  r->printf("<p class='meta finfo'><span class='bx'>%s</span> · <span class='mono'>%s</span> · %s</p>",
+            esc(box.peer.name).c_str(), dmxRangeLabel(f->address, f->count).c_str(), esc(remoteTypeLabel(box, *f)).c_str());
   faderScript(r);
   pageEnd(req, r);
 }
@@ -224,7 +259,7 @@ static void handleRemoteValuesApi(AsyncWebServerRequest* req) {
   if (!loadRemote(req, box, f)) return req->send(404, "application/json", "{}");
   req->send(200, "application/json",
             "{\"v\":" + remoteValuesJson(box, *f, false) + ",\"p\":" + remoteValuesJson(box, *f, true) +
-                ",\"r\":" + remoteRefsJson(box, *f) + ",\"on\":" + (box.peer.online() ? "1" : "0") +
+                ",\"r\":" + remoteRefsJson(box, *f) + ",\"m\":" + remoteMarksJson(box, *f) + ",\"on\":" + (box.peer.online() ? "1" : "0") +
                 ",\"ver\":" + String(box.version) + ",\"err\":\"" +
                 (box.lastError.isEmpty() || millis() - box.lastErrorMs > 15000 ? String("") : jsonEsc(box.lastError)) + "\"}");
 }

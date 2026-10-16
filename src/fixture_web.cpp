@@ -2,11 +2,14 @@
 #include "fixtures.h"
 #include "fader_ui.h"
 #include "system.h"
+#include "cues.h"
+#include "cue_web.h"
 #ifdef HAS_LORA
 #include "sync.h"
 #include "sync_web.h"
 #endif
 #include <ArduinoJson.h>
+#include <esp_rom_crc.h>
 
 extern uint8_t data[];
 
@@ -62,11 +65,11 @@ div.tile{cursor:pointer}
 .sw{display:inline-block;width:11px;height:11px;border-radius:2px;border:1px solid #555}
 .lv{display:block;height:4px;background:var(--line);border-radius:2px;margin-top:4px;overflow:hidden}
 .lv i{display:block;height:100%;background:linear-gradient(90deg,#4a4a4a,#fff)}
-#conn,#sched{background:transparent;padding:8px 12px;font-size:14px}
+#connp,#schedp{background:transparent;padding:8px 12px;font-size:14px}
 .tile.new{background:transparent;box-shadow:none;min-height:84px}
 .tile.off{opacity:.45}
 .tile.new{display:flex;align-items:center;justify-content:center;border-style:dashed;color:var(--muted);padding:12px}
-.tiles.home{margin-top:26px}
+.tiles.home{margin-top:8px}
 @media(max-width:600px){.tiles{grid-template-columns:1fr}}
 form.f label{display:block;margin:12px 0 4px;color:var(--muted);font-size:13px}
 input,select,textarea{font-size:15px;padding:8px;background:#0d0f12;color:var(--text);border:1px solid var(--line);border-radius:4px;width:100%;font-family:inherit}
@@ -91,6 +94,43 @@ body.lost header,body.lost main,body.lost footer{opacity:.3;filter:grayscale(1);
 .spin{width:34px;height:34px;border:3px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:sp .8s linear infinite}
 .spin.sm{width:12px;height:12px;border-width:2px;display:inline-block;vertical-align:-1px}
 @keyframes sp{to{transform:rotate(360deg)}}
+.btn svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round;vertical-align:-3px}
+.btn:disabled{opacity:.35;cursor:default}
+.btn.sm{padding:5px 8px;font-size:13px}
+.play{padding:12px 14px}
+.prow{display:flex;gap:10px;align-items:center;justify-content:space-between;margin:2px 0 6px}
+.prow select{flex:1}
+#pseq{border:none;background:transparent;font-size:22px;font-weight:600;padding:2px 0;color:var(--text);cursor:pointer;min-width:0}
+#pplay{display:flex;align-items:center;gap:4px;padding:8px 14px}
+.mplay{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px;margin:10px 0 4px}
+.mline{display:flex;justify-content:space-between;gap:8px;font-size:14px;margin:0 2px 6px}
+.mcue{white-space:pre;overflow:hidden;text-overflow:ellipsis}
+.mcount{font-size:13px;white-space:nowrap}
+.mbtns{display:flex;gap:4px}
+.mbtns .btn{flex:1;padding:7px 0;display:flex;justify-content:center;min-width:0}
+.msep{width:8px;flex:none}
+.bx.own{color:var(--accent);font-weight:600}
+.krow{display:flex;justify-content:space-between;align-items:baseline}
+.krow a{text-transform:none;letter-spacing:0;font-size:14px}
+.ktitle{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:4px}
+h2.ktitle{margin:22px 0 0;font-weight:500}
+.prow>span{flex:1}
+.pcue{font-size:15px;white-space:pre;color:var(--muted)}
+.pbar{height:4px;background:var(--line);border-radius:2px;overflow:hidden;margin:4px 0 10px}
+.pbar i{display:block;height:100%;width:0;background:var(--accent)}
+.ptrans{display:grid;grid-template-columns:auto 1fr 1fr auto;gap:8px}
+.ptrans .btn{display:flex;align-items:center;justify-content:center;gap:4px;padding:12px 10px}
+.pcount{margin-top:12px;font-size:14px}
+.pchg{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px}
+.pchg .btn{flex:1}
+.pform{margin-top:10px;border-top:1px solid var(--line);padding-top:6px}
+.pform label{display:block;margin:8px 0 4px;color:var(--muted);font-size:13px}
+#pnote{margin-top:8px}#pnote:empty{display:none}
+table.cues input{padding:5px;font-size:14px}
+table.cues td{vertical-align:middle}
+table.cues input[type=number]{width:64px}
+table.cues .acts{white-space:nowrap}
+tr.here td{background:#1f2a36}
 #busy{display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:98;background:rgba(17,19,23,.6);align-items:center;
  justify-content:center;flex-direction:column;gap:14px;color:var(--text);font-size:15px}
 )CSS";
@@ -125,6 +165,44 @@ window.waitLink=function(box,ms){const t0=Date.now();return new Promise(res=>{(f
 })();
 </script>)JS";
 
+struct Asset {
+  const char* path;
+  String ver;
+};
+static std::vector<Asset> assets;
+
+void registerAsset(AsyncWebServer& server, const char* path, const char* type, const char* text) {
+  const char* d = text;
+  size_t len = strlen(text);
+  auto strip = [&](const char* open, const char* close) {
+    size_t o = strlen(open), c = strlen(close);
+    if (len >= o && !strncmp(d, open, o)) {
+      d += o;
+      len -= o;
+    }
+    while (len && (d[len - 1] == '\n' || d[len - 1] == ' ')) len--;
+    if (len >= c && !strncmp(d + len - c, close, c)) len -= c;
+  };
+  strip("<script>", "</script>");
+  strip("<style>", "</style>");
+  char ver[9];
+  snprintf(ver, sizeof(ver), "%08x", (unsigned)esp_rom_crc32_le(0, (const uint8_t*)d, len));
+  assets.push_back({path, ver});
+  String t = type;
+  server.on(path, HTTP_GET, [d, len, t](AsyncWebServerRequest* req) {
+    AsyncWebServerResponse* r = req->beginResponse_P(200, t, (const uint8_t*)d, len);
+    r->addHeader("Cache-Control", "public, max-age=31536000, immutable");
+    req->send(r);
+  });
+}
+
+String assetUrl(const char* path) {
+  for (const Asset& a : assets) {
+    if (!strcmp(a.path, path)) return String(path) + "?v=" + a.ver;
+  }
+  return path;
+}
+
 String esc(const String& s) {
   String o;
   o.reserve(s.length() + 8);
@@ -158,9 +236,7 @@ AsyncResponseStream* pageBegin(AsyncWebServerRequest* req, const String& title, 
            "<meta name='viewport' content='width=device-width, initial-scale=1'>"
            "<link rel='icon' href='data:,'><base target='_self'><title>");
   r->print(esc(title));
-  r->print(" · dmxbox</title><style>");
-  r->print(FPSTR(PAGE_CSS));
-  r->print("</style>");
+  r->printf(" · dmxbox</title><link rel='stylesheet' href='%s'>", assetUrl("/s/app.css").c_str());
   if (extraHead) r->print(extraHead);
   r->printf("</head><body><div id='lost'>Connection lost – retrying…</div>"
             "<header><a class='brand' href='/'><span class='logo'>%s</span><span>dmxbox</span></a>"
@@ -171,10 +247,9 @@ AsyncResponseStream* pageBegin(AsyncWebServerRequest* req, const String& title, 
 }
 
 void pageEnd(AsyncWebServerRequest* req, AsyncResponseStream* r) {
-  r->print("</main><footer><a href='/defs'>Definitions</a><a href='/connectivity'>Connectivity</a>"
+  r->print("</main><footer><a href='/show'>Show</a><a href='/defs'>Definitions</a><a href='/connectivity'>Connectivity</a>"
            "<a href='/timesetup'>Schedule</a></footer>");
-  r->print(FPSTR(MONITOR_JS));
-  r->print("</body></html>");
+  r->printf("<script src='%s'></script></body></html>", assetUrl("/s/monitor.js").c_str());
   req->send(r);
 }
 
@@ -238,11 +313,9 @@ function render(s){
   if(l)out+='<span class="'+(l.enabled&&l.boxes>1?'':'dim')+'">'+IC.lora+(!l.enabled?'off':l.boxes>1?l.boxes+' boxes':'alone')+'</span>';
   if(s.time)out+='<span class="dim">'+IC.clock+h(s.time)+'</span>';
   document.getElementById('conn').innerHTML=out;
-  document.getElementById('sched').textContent='Schedule: '+s.sched;
+  document.getElementById('sched').textContent=s.sched.charAt(0).toUpperCase()+s.sched.slice(1);
   const n=document.getElementById('note');let t='';
   let spin=false;
-  if(s.snap){const p=s.snap;spin=p.pending>0;t=(p.reset?'Reset':'Save')+(p.pending?' in progress: ':': ')+p.ok+' of '+p.total+' boxes';
-    if(p.failed.length)t+=' – no answer from '+p.failed.join(', ');}
   if(s.errors&&s.errors.length)t+=(t?' · ':'')+s.errors.map(e=>e.box+': '+e.msg).join(' · ');
   n.innerHTML=(spin?'<span class="spin sm"></span> ':'')+h(t);n.style.display=t?'':'none';
   if(s.boxes)document.querySelectorAll('.tile[data-box]').forEach(e=>{const on=s.boxes[e.dataset.box];if(on!==undefined)e.classList.toggle('off',!on)});
@@ -320,10 +393,11 @@ static String groupSwatch(const std::vector<TileChannel>& chans) {
 
 void fixtureTile(AsyncResponseStream* r, const String& href, const String& name, const String& dmx, const String& type,
                  const String& box, const String& warn, const std::vector<TileGroup>& groups, uint16_t boxId, bool off) {
+  // the box comes first; this box is highlighted, so its fixtures stand out in the list
   r->printf("<div class='tile%s' data-href='%s' data-box='%u'><a class='name' href='%s'>%s</a>"
-            "<div class='meta'><span class='mono'>%s</span> · %s · %s</div>",
-            off ? " off" : "", esc(href).c_str(), boxId, esc(href).c_str(), esc(name).c_str(), dmx.c_str(),
-            esc(type).c_str(), esc(box).c_str());
+            "<div class='meta'><span class='bx%s'>%s</span> · <span class='mono'>%s</span> · %s</div>",
+            off ? " off" : "", esc(href).c_str(), boxId, esc(href).c_str(), esc(name).c_str(), boxId ? "" : " own",
+            esc(box).c_str(), dmx.c_str(), esc(type).c_str());
   if (!warn.isEmpty()) r->printf("<div class='meta warn'>%s</div>", esc(warn).c_str());
   if (!groups.empty()) {
     r->print("<div class='chips'>");
@@ -376,18 +450,18 @@ static void localTile(AsyncResponseStream* r, const Fixture& f) {
 
 void sendFixturesPage(AsyncWebServerRequest* request) {
   AsyncResponseStream* r = pageBegin(request, "Fixtures");
-  r->print("<a class='panel status' id='conn' href='/connectivity'><span class='dim'>…</span></a>");
-  r->print("<a class='panel' id='sched' href='/timesetup'>Schedule: …</a>");
-  r->print("<div class='row'><form method='post' action='/snapshot/save'><button class='btn grow' type='submit'>Save</button></form>"
-           "<a class='btn grow danger' href='/snapshot/reset'>Reset</a></div>");
+  r->print("<a class='panel' id='connp' href='/connectivity'><div class='ktitle'>Connectivity</div>"
+           "<div class='status' id='conn'><span class='dim'>…</span></div></a>");
+  r->print("<a class='panel' id='schedp' href='/timesetup'><div class='ktitle'>Timer</div><div id='sched'>…</div></a>");
+  renderPlaybackPanel(r);
   r->print("<div class='panel meta' id='note' style='display:none'></div>");
-  r->print("<div class='tiles home'>");
+  r->print("<h2 class='ktitle'>Fixtures</h2><div class='tiles home'>");
   for (const Fixture& f : fixtureList) localTile(r, f);
 #ifdef HAS_LORA
   renderRemoteTiles(r);
 #endif
   r->print("<a class='tile new' href='/fixture/edit'>+ New Fixture</a></div>");
-  r->print(FPSTR(HOME_JS));
+  r->printf("<script src='%s'></script>", assetUrl("/s/home.js").c_str());
   pageEnd(request, r);
 }
 
@@ -650,16 +724,29 @@ static String fixtureRefsJson(const Fixture& f) {
   return s + "}";
 }
 
+// Channels changed by hand since the last cue change: [channel indices].
+static String fixtureMarksJson(const Fixture& f) {
+  String s = "[";
+  uint16_t n = fixtureChannelCount(f);
+  bool first = true;
+  for (uint16_t i = 0; i < n; i++) {
+    if (!cuesMarked(f.address + i)) continue;
+    if (!first) s += ",";
+    s += String(i);
+    first = false;
+  }
+  return s + "]";
+}
+
 static void handleFixturePage(AsyncWebServerRequest* req) {
   Fixture* fp = findFixture(arg(req, "id").toInt());
   if (!fp) return req->redirect("/");
   const Fixture& f = *fp;
-  AsyncResponseStream* r = pageBegin(req, f.name, FADER_HEAD);
+  AsyncResponseStream* r = pageBegin(req, f.name, faderHead().c_str());
   r->printf("<div class='titlebar'><h1>%s</h1><span class='row'>", esc(f.name).c_str());
   if (f.defId == 0) r->printf("<a class='btn' href='/fixturenames?id=%u'>Channel names</a>", f.id);
   r->printf("<a class='btn' href='/fixture/edit?id=%u'>Edit</a></span></div>", f.id);
-  r->printf("<p class='meta'><span class='mono'>%s</span> · %s · %s</p>", dmxRangeLabel(f).c_str(),
-            esc(fixtureTypeLabel(f)).c_str(), esc(localBoxName()).c_str());
+  renderMiniPlayback(r);
   String id = String(f.id);
   std::vector<uint8_t> groups = fixtureGroups(f);
   std::vector<uint8_t> present = groupsPresent(groups);
@@ -670,6 +757,7 @@ static void handleFixturePage(AsyncWebServerRequest* req) {
   grid.presetUrl = "/api/preset?fix=" + id;
   grid.valuesJson = fixtureValuesJson(f);
   grid.refsJson = fixtureRefsJson(f);
+  grid.marksJson = fixtureMarksJson(f);
   grid.version = String(fixturesVersion());
   faderGridBegin(r, grid);
   for (const FixtureControl& c : fixtureControls(f)) {
@@ -679,7 +767,18 @@ static void handleFixturePage(AsyncWebServerRequest* req) {
               c.fine >= 0 ? f.address + c.fine : -1, cdef ? &cdef->ranges : nullptr);
   }
   faderGridEnd(r);
-  for (uint8_t g : present) faderPresetPanel(r, g, presetsFor(f, g), presetActive(f.id, g));
+  for (uint8_t g : present) {
+    std::vector<RangeChannel> rcs;
+    for (const FixtureControl& c : fixtureControls(f)) {
+      const ChannelDef* cdef = fixtureChannelDef(f, c.ch);
+      if (cdef && !cdef->ranges.empty() && c.ch < groups.size() && groups[c.ch] == g) {
+        rcs.push_back({c.ch, c.fine, fixtureChannelName(f, c.ch), &cdef->ranges});
+      }
+    }
+    faderPresetPanel(r, g, presetsFor(f, g), presetActive(f.id, g), rcs);
+  }
+  r->printf("<p class='meta finfo'><span class='bx own'>%s</span> · <span class='mono'>%s</span> · %s</p>",
+            esc(localBoxName()).c_str(), dmxRangeLabel(f).c_str(), esc(fixtureTypeLabel(f)).c_str());
   faderScript(r);
   pageEnd(req, r);
 }
@@ -689,7 +788,7 @@ static void handleChannelValuesApi(AsyncWebServerRequest* req) {
   if (!fp) return req->send(404, "application/json", "{}");
   req->send(200, "application/json",
             "{\"v\":" + fixtureValuesJson(*fp) + ",\"r\":" + fixtureRefsJson(*fp) +
-                ",\"ver\":" + String(fixturesVersion()) + "}");
+                ",\"m\":" + fixtureMarksJson(*fp) + ",\"ver\":" + String(fixturesVersion()) + "}");
 }
 
 static void handlePresetApi(AsyncWebServerRequest* req) {
@@ -726,7 +825,9 @@ static void handleChannelSetApi(AsyncWebServerRequest* req) {
     data[dmx] = constrain(v, 0, 255);
   }
   uint16_t last = (ch < (int)fine.size() && fine[ch] >= 0) ? max(dmx, (uint16_t)(fp->address + fine[ch])) : dmx;
-  presetChannelsChanged(min(dmx, last), last);
+  uint16_t first = (ch < (int)fine.size() && fine[ch] >= 0) ? min(dmx, (uint16_t)(fp->address + fine[ch])) : dmx;
+  presetChannelsChanged(first, last);
+  cuesManualChange(first, last);
   req->send(200, "text/plain", "ok");
 }
 
@@ -776,9 +877,11 @@ static void handleChannel(AsyncWebServerRequest* req) {
   if (hasArg(req, "val")) {
     data[dmx] = constrain(arg(req, "val").toInt(), 0, 255);
     presetChannelsChanged(dmx, dmx);
+    cuesManualChange(dmx, dmx);
   } else if (hasArg(req, "delta")) {
     data[dmx] = constrain((int)data[dmx] + arg(req, "delta").toInt(), 0, 255);
     presetChannelsChanged(dmx, dmx);
+    cuesManualChange(dmx, dmx);
   }
   if (hasArg(req, "name") && fp->defId == 0) {
     Fixture copy = *fp;
@@ -917,6 +1020,13 @@ static void handleDefSave(AsyncWebServerRequest* req) {
 static void handleDefDelete(AsyncWebServerRequest* req) {
   FixtureDef* d = findDef(arg(req, "id").toInt());
   if (!d) return sendMessage(req, 404, "Not found", "Definition does not exist.");
+  String remoteUsers;
+#ifdef HAS_LORA
+  remoteUsers = syncDefUsedBy(d->uid);
+#endif
+  if (!remoteUsers.isEmpty()) {
+    return sendMessage(req, 409, "Not deleted", "Still used on other boxes: " + remoteUsers);
+  }
   if (arg(req, "confirm") == "1") {
     String err = deleteDef(d->id);
     if (!err.isEmpty()) return sendMessage(req, 409, "Not deleted", err);
@@ -925,6 +1035,9 @@ static void handleDefDelete(AsyncWebServerRequest* req) {
   int used = defUsage(d->id);
   AsyncResponseStream* r = pageBegin(req, "Delete definition");
   r->printf("<h1>Delete %s?</h1>", esc(d->name).c_str());
+#ifdef HAS_LORA
+  r->print("<p class='meta'>The definition is deleted on all linked boxes.</p>");
+#endif
   if (used) r->printf("<div class='panel warn'>Still used by %d fixture(s); delete or change them first.</div>", used);
   r->print("<div class='row'>");
   if (!used) r->printf("<a class='btn danger' href='/def/delete?id=%u&confirm=1'>Delete</a>", d->id);
@@ -978,20 +1091,60 @@ function oflConvert(o){
   const mf=(o.manufacturer&&o.manufacturer.name)||o.manufacturerKey||'';
   return {name:o.name||'Import',manufacturer:mf,modes};
 }
+// grandMA2 fixture type XML (one or several documents pasted together)
+const MA_NAMES={PAN:'Pan',TILT:'Tilt',DIM:'Dimmer',SHUTTER:'Shutter',STROBE:'Strobe',COLOR1:'Color',COLOR2:'Color 2',
+ GOBO1:'Gobo',GOBO2:'Gobo 2',GOBO1_POS:'Gobo Rot',GOBO2_POS:'Gobo 2 Rot',PRISMA1:'Prism',PRISMA1POS:'Prism Rot',
+ FOCUS:'Focus',ZOOM:'Zoom',FROST:'Frost',IRIS:'Iris',POSITIONMSPEED:'PT Speed',EFFECT:'Effect',RESET:'Reset',
+ COLORRGB1:'Red',COLORRGB2:'Green',COLORRGB3:'Blue',COLORRGB4:'White',COLORRGB5:'Amber',COLORRGB6:'UV',
+ COLORMIXER:'Color Mix',CTO:'CTO',CTB:'CTB',CONTROL:'Control'};
+const MA_GROUPS={POSITION:'position',DIMMER:'dimmer',GOBO:'gobo',COLOR:'color',BEAM:'beam',FOCUS:'focus',CONTROL:'control'};
+function maAttrs(tag){const a={};tag.replace(/([\w:]+)="([^"]*)"/g,(m,k,v)=>{a[k]=v.replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&lt;/g,'<').replace(/&gt;/g,'>')});return a}
+function maName(attr){const u=attr.toUpperCase();if(MA_NAMES[u])return MA_NAMES[u];
+  return attr.charAt(0).toUpperCase()+attr.slice(1).toLowerCase()}
+function maFixture(x){
+  const ft=maAttrs((x.match(/<FixtureType\b[^>]*>/)||[''])[0]);
+  const tagText=t=>{const m=x.match(new RegExp('<'+t+'>([^<]*)</'+t+'>'));return m?m[1].trim():''};
+  const chans=[],used={};
+  const re=/<ChannelType\b([^>]*)>([\s\S]*?)<\/ChannelType>/g;let m;
+  while((m=re.exec(x))){
+    const a=maAttrs(m[1]),coarse=+a.coarse,fine=+a.fine||0;if(!coarse)continue;
+    let name=maName(a.attribute||'Ch'+coarse);
+    while(used[name])name+='*';used[name]=1;
+    const c={index:coarse,name,type:name.replace(/\*+$/,'').toLowerCase()};
+    const g=MA_GROUPS[(a.preset||'').toUpperCase()];if(g)c.group=g;
+    const div=fine?256:1,ranges=[];
+    m[2].replace(/<ChannelSet\b([^>]*)\/?>/g,(t,attrs)=>{const s=maAttrs(attrs);if(s.from_dmx===undefined)return;
+      ranges.push({from:Math.min(255,Math.floor(+s.from_dmx/div)),to:Math.min(255,Math.floor(+s.to_dmx/div)),name:s.name||''})});
+    if(ranges.length)c.ranges=ranges;
+    if(fine){c.fine=fine;chans[fine-1]={index:fine,name:name+' fine',type:'fine'}}
+    chans[coarse-1]=c;
+  }
+  for(let i=0;i<chans.length;i++)if(!chans[i])chans[i]={index:i+1,name:'Ch '+(i+1)};
+  const name=((ft.name||'Import')+(ft.mode?' '+ft.mode:'')).slice(0,32);
+  return {name,manufacturer:tagText('manufacturer'),modes:[{name:ft.mode||(chans.length+'ch'),channels:chans}]};
+}
+function maConvert(text){
+  const docs=text.split(/(?=<\?xml)/).filter(d=>/<FixtureType\b/.test(d));
+  const out=[];docs.forEach(d=>d.split(/(?=<FixtureType\b)/).slice(1).forEach(f=>out.push(maFixture(f))));
+  if(!out.length)throw new Error('no grandMA2 FixtureType found');
+  return out.length==1?out[0]:out;
+}
 function toDmxBox(text){
+  if(text.trim().startsWith('<'))return maConvert(text);
   const o=JSON.parse(text);
   return o&&o.availableChannels?oflConvert(o):o;
 }
 function loadFile(inp){
   const f=inp.files[0];if(!f)return;
-  const rd=new FileReader();rd.onload=()=>{document.getElementById('json').value=rd.result};rd.readAsText(f);
+  const ta=document.getElementById('json');ta.value='';
+  [...inp.files].forEach(f=>{const rd=new FileReader();rd.onload=()=>{ta.value+=(ta.value?'\n':'')+rd.result};rd.readAsText(f)});
 }
 function doImport(ev){
   ev.preventDefault();
   const out=document.getElementById('out');
   let payload;
   try{payload=JSON.stringify(toDmxBox(document.getElementById('json').value));}
-  catch(e){out.className='panel err';out.textContent='Invalid JSON: '+e.message;return false;}
+  catch(e){out.className='panel err';out.textContent='Not readable: '+e.message;return false;}
   fetch('/api/defs/import',{method:'POST',body:new URLSearchParams({json:payload,ajax:'1'})})
     .then(r=>r.json()).then(d=>{
       out.className='panel'+(d.ok?'':' err');
@@ -1005,10 +1158,10 @@ static void handleImportPage(AsyncWebServerRequest* req) {
   AsyncResponseStream* r = pageBegin(req, "Import definition", IMPORT_SCRIPT);
   r->print("<p class='meta'><a href='/defs'>Definitions</a></p><h1>Import definition</h1>");
   r->print("<form class='f' action='/api/defs/import' method='post' onsubmit='return doImport(event)'>");
-  r->print("<label>JSON file</label><input type='file' accept='.json,application/json' onchange='loadFile(this)'>");
-  r->print("<label>or paste JSON</label><textarea id='json' name='json' rows='14'></textarea>");
-  r->print("<div class='help'>Supported: DmxBox export, labX fixture files and Open Fixture Library (JSON). "
-           "Several modes become separate definitions.</div>");
+  r->print("<label>Files</label><input type='file' multiple accept='.json,.xml,application/json,text/xml' onchange='loadFile(this)'>");
+  r->print("<label>or paste</label><textarea id='json' name='json' rows='14'></textarea>");
+  r->print("<div class='help'>Supported: DmxBox export, labX fixture files, Open Fixture Library (JSON) and grandMA2 "
+           "fixture types (XML, several files at once). Several modes become separate definitions.</div>");
   r->print("<div class='row'><button class='btn primary grow' type='submit'>Import</button></div></form>");
   r->print("<div id='out' style='display:block'></div>");
   pageEnd(req, r);
@@ -1042,6 +1195,10 @@ static void handleImportApi(AsyncWebServerRequest* req) {
 // ---------------- registration ----------------
 
 void registerFixtureRoutes(AsyncWebServer& server) {
+  registerAsset(server, "/s/app.css", "text/css", PAGE_CSS);
+  registerAsset(server, "/s/monitor.js", "application/javascript", MONITOR_JS);
+  registerAsset(server, "/s/home.js", "application/javascript", HOME_JS);
+  registerFaderAssets(server);
   server.on("/", HTTP_GET, sendFixturesPage);
   server.on("/fixture/edit", HTTP_GET, handleFixtureEdit);
   server.on("/fixture/save", HTTP_ANY, handleFixtureSave);

@@ -23,6 +23,10 @@ struct FixLock {
 static const char* PATCH_FILE = "/patch.json";
 static const char* DEFS_DIR = "/defs";
 
+static const char* TOMB_FILE = "/deftomb.json";
+static const size_t TOMB_MAX = 64;
+static std::vector<DefTombstone> tombstones;
+
 static String defPath(uint16_t id) {
   return String(DEFS_DIR) + "/" + String(id) + ".json";
 }
@@ -292,7 +296,74 @@ static bool writePatch() {
 static bool writeDef(const FixtureDef& d) {
   JsonDocument doc;
   defToJson(d, doc.to<JsonObject>());
+  doc["uid"] = d.uid;
+  doc["rev"] = d.rev;
   return writeJsonFile(defPath(d.id), doc);
+}
+
+static void writeTombstones() {
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  for (const DefTombstone& t : tombstones) {
+    JsonArray e = arr.add<JsonArray>();
+    e.add(t.uid);
+    e.add(t.rev);
+  }
+  writeJsonFile(TOMB_FILE, doc);
+}
+
+static void removeTombstone(uint32_t uid) {
+  size_t before = tombstones.size();
+  tombstones.erase(std::remove_if(tombstones.begin(), tombstones.end(),
+                                  [uid](const DefTombstone& t) { return t.uid == uid; }),
+                   tombstones.end());
+  if (tombstones.size() != before) writeTombstones();
+}
+
+FixtureDef* findDefByUid(uint32_t uid) {
+  for (FixtureDef& d : fixtureDefs) if (d.uid == uid) return &d;
+  return nullptr;
+}
+
+std::vector<DefTombstone> defTombstones() {
+  FixLock lock;
+  return tombstones;
+}
+
+int defTombstoneRev(uint32_t uid) {
+  FixLock lock;
+  for (const DefTombstone& t : tombstones) if (t.uid == uid) return t.rev;
+  return -1;
+}
+
+void defAddTombstone(uint32_t uid, uint16_t rev) {
+  FixLock lock;
+  for (DefTombstone& t : tombstones) {
+    if (t.uid != uid) continue;
+    if ((int16_t)(rev - t.rev) > 0) {
+      t.rev = rev;
+      writeTombstones();
+      version++;
+    }
+    return;
+  }
+  tombstones.push_back({uid, rev});
+  if (tombstones.size() > TOMB_MAX) tombstones.erase(tombstones.begin());
+  writeTombstones();
+  version++;
+}
+
+bool defFromJson(JsonVariantConst root, FixtureDef& d) {
+  JsonObjectConst obj = root.as<JsonObjectConst>();
+  if (obj.isNull()) return false;
+  d.name = clip(obj["name"] | "", FIXTURE_NAME_MAX);
+  if (d.name.isEmpty()) d.name = "Import";
+  d.manufacturer = clip(obj["manufacturer"] | "", FIXTURE_NAME_MAX);
+  JsonArrayConst chans = obj["modes"][0]["channels"].as<JsonArrayConst>();
+  if (chans.isNull()) chans = obj["channels"].as<JsonArrayConst>();
+  d.channels.clear();
+  parseChannels(chans, d.channels);
+  return !d.channels.empty();
 }
 
 bool fixturesBegin() {
@@ -332,12 +403,29 @@ void fixturesLoad() {
       d.name = clip(doc["name"] | "", FIXTURE_NAME_MAX);
       d.manufacturer = clip(doc["manufacturer"] | "", FIXTURE_NAME_MAX);
       parseChannels(doc["modes"][0]["channels"].as<JsonArrayConst>(), d.channels);
+      d.uid = doc["uid"] | 0;
+      d.rev = doc["rev"] | 1;
+      if (!d.uid) {
+        // from before the link-wide definitions: identical content on different boxes gets the same uid
+        d.uid = defCrc(d);
+        if (findDefByUid(d.uid)) d.uid = esp_random() | 1;
+        writeDef(d);
+      }
       fixtureDefs.push_back(d);
       if (id >= nextDefId) nextDefId = id + 1;
     }
   }
   std::sort(fixtureDefs.begin(), fixtureDefs.end(),
             [](const FixtureDef& a, const FixtureDef& b) { return a.name < b.name; });
+  tombstones.clear();
+  File tf = LittleFS.exists(TOMB_FILE) ? LittleFS.open(TOMB_FILE, "r") : File();
+  if (tf) {
+    JsonDocument doc;
+    if (!deserializeJson(doc, tf)) {
+      for (JsonArrayConst e : doc.as<JsonArrayConst>()) tombstones.push_back({e[0] | 0u, (uint16_t)(e[1] | 0)});
+    }
+    tf.close();
+  }
 
   File pf = LittleFS.open(PATCH_FILE, "r");
   if (pf) {
@@ -505,7 +593,7 @@ String deleteFixture(uint16_t id) {
   return "";
 }
 
-String saveDef(FixtureDef& d) {
+String saveDef(FixtureDef& d, bool fromLink) {
   FixLock lock;
   version++;
   d.name = clip(d.name, FIXTURE_NAME_MAX);
@@ -515,7 +603,12 @@ String saveDef(FixtureDef& d) {
   if (d.channels.size() > DMX_UNIVERSE_SIZE) return "At most 512 channels";
 
   if (d.id != 0) {
-    if (!findDef(d.id)) return "Definition not found";
+    FixtureDef* old = findDef(d.id);
+    if (!old) return "Definition not found";
+    if (!fromLink) {
+      d.uid = old->uid;
+      d.rev = old->rev + 1;
+    }
     for (const Fixture& f : fixtureList) {
       if (f.defId == d.id && f.address + d.channels.size() - 1 > DMX_UNIVERSE_SIZE) {
         return "Fixture '" + f.name + "' (address " + String(f.address) + ") would not fit with " +
@@ -523,9 +616,16 @@ String saveDef(FixtureDef& d) {
       }
     }
   } else {
+    if (!fromLink) {
+      // identical content imported on several boxes ends up as one definition
+      d.uid = defCrc(d);
+      if (findDefByUid(d.uid) || defTombstoneRev(d.uid) >= 0) d.uid = esp_random() | 1;
+      d.rev = 1;
+    }
     d.id = nextDefId++;
   }
   if (!writeDef(d)) return "Saving failed";
+  removeTombstone(d.uid);
 
   FixtureDef* existing = findDef(d.id);
   if (existing) *existing = d;
@@ -535,10 +635,13 @@ String saveDef(FixtureDef& d) {
   return "";
 }
 
-String deleteDef(uint16_t id) {
+String deleteDef(uint16_t id, uint16_t tombRev) {
   FixLock lock;
   version++;
-  if (!findDef(id)) return "Definition not found";
+  FixtureDef* d = findDef(id);
+  if (!d) return "Definition not found";
+  uint32_t uid = d->uid;
+  uint16_t rev = tombRev ? tombRev : d->rev + 1;
   String users;
   for (const Fixture& f : fixtureList) {
     if (f.defId == id) users += (users.isEmpty() ? "" : ", ") + f.name;
@@ -548,6 +651,7 @@ String deleteDef(uint16_t id) {
   fixtureDefs.erase(std::remove_if(fixtureDefs.begin(), fixtureDefs.end(),
                                    [id](const FixtureDef& d) { return d.id == id; }),
                     fixtureDefs.end());
+  defAddTombstone(uid, rev);
   return "";
 }
 

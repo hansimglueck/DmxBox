@@ -47,10 +47,14 @@ static String formatUptime(unsigned long ms) {
 void displayUpdate(const DisplayStatus& s) {
   oled.clear();
 
+  String right = s.timeValid ? s.time : formatUptime(s.uptimeMs);
+  String name = s.boxName.isEmpty() ? String(DISPLAY_TITLE) : s.boxName;
+  int maxW = 128 - oled.getStringWidth(right) - 6;
+  while (name.length() > 1 && oled.getStringWidth(name) > maxW) name.remove(name.length() - 1);
   oled.setTextAlignment(TEXT_ALIGN_LEFT);
-  oled.drawString(0, 0, DISPLAY_TITLE);
+  oled.drawString(0, 0, name);
   oled.setTextAlignment(TEXT_ALIGN_RIGHT);
-  oled.drawString(128, 0, s.timeValid ? s.time : formatUptime(s.uptimeMs));
+  oled.drawString(128, 0, right);
   oled.setTextAlignment(TEXT_ALIGN_LEFT);
   oled.drawHorizontalLine(0, 12, 128);
 

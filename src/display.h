@@ -14,6 +14,7 @@ struct DisplayStatus {
   String time;
   unsigned long uptimeMs;
   int linkPeers = -1;  // online boxes in the LoRa link, -1 = no link
+  String boxName;
 };
 
 #ifdef HAS_OLED

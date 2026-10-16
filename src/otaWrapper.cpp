@@ -1,4 +1,5 @@
 #include <OTAWrapper.h>
+#include <esp_task_wdt.h>
 
 void setupOTA(const char* OTAssid, const char* OTApassword) {
   ArduinoOTA.setHostname(OTAssid);
@@ -14,8 +15,9 @@ void setupOTA(const char* OTAssid, const char* OTApassword) {
       Serial.println("Start updating " + type); });
       ArduinoOTA.onEnd([]()
              { Serial.println("\nEnd"); });
+      // the upload runs inside handle() and blocks loop() far longer than the watchdog timeout
       ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
-                  { Serial.printf("Progress: %u%%\r", (progress / (total / 100))); });
+                  { esp_task_wdt_reset(); Serial.printf("Progress: %u%%\r", (progress / (total / 100))); });
       ArduinoOTA.onError([](ota_error_t error)
                {
       Serial.printf("Error[%u]: ", error);

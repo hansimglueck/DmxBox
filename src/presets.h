@@ -48,6 +48,8 @@ String presetDelete(uint16_t presetId);
 void presetChannelsChanged(uint16_t dmxFrom, uint16_t dmxTo);
 void presetsFixtureDeleted(uint16_t fixtureId);
 
-// Active references are part of the snapshot: written on Save, applied again at boot.
-void presetsSnapshotSave();
-void presetsClearRefs();
+// Cues: replace all active references; values of a preset as stored for one fixture.
+void presetsSetRefs(const std::vector<PresetRef>& refs);
+bool presetValuesFor(uint16_t fixtureId, uint16_t presetId, std::vector<std::pair<uint16_t, uint8_t>>& out);
+// References of the old snapshot file (applied by presetsLoad); deletes the file.
+std::vector<PresetRef> presetsTakeLegacyRefs();

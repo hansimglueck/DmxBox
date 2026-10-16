@@ -1,0 +1,553 @@
+{
+ "name": "LED IP Beam 14CH",
+ "manufacturer": "LabX",
+ "modes": [
+  {
+   "name": "14CH",
+   "channels": [
+    {
+     "index": 1,
+     "name": "Pan",
+     "type": "pan",
+     "group": "position",
+     "fine": 2
+    },
+    {
+     "index": 2,
+     "name": "Pan fine",
+     "type": "fine"
+    },
+    {
+     "index": 3,
+     "name": "Tilt",
+     "type": "tilt",
+     "group": "position",
+     "fine": 4
+    },
+    {
+     "index": 4,
+     "name": "Tilt fine",
+     "type": "fine"
+    },
+    {
+     "index": 5,
+     "name": "PT Speed",
+     "type": "pt speed",
+     "group": "position",
+     "ranges": [
+      {
+       "from": 0,
+       "to": 255,
+       "name": "p/t speed fast to slow"
+      }
+     ]
+    },
+    {
+     "index": 6,
+     "name": "Dimmer",
+     "type": "dimmer",
+     "group": "dimmer"
+    },
+    {
+     "index": 7,
+     "name": "Shutter",
+     "type": "shutter",
+     "group": "beam",
+     "ranges": [
+      {
+       "from": 0,
+       "to": 3,
+       "name": "closed"
+      },
+      {
+       "from": 4,
+       "to": 99,
+       "name": "strobe"
+      },
+      {
+       "from": 100,
+       "to": 149,
+       "name": "pulse strobe"
+      },
+      {
+       "from": 150,
+       "to": 199,
+       "name": "sharp flash"
+      },
+      {
+       "from": 200,
+       "to": 249,
+       "name": "random strobe"
+      },
+      {
+       "from": 250,
+       "to": 255,
+       "name": "open"
+      }
+     ]
+    },
+    {
+     "index": 8,
+     "name": "Color",
+     "type": "color",
+     "group": "color",
+     "ranges": [
+      {
+       "from": 0,
+       "to": 6,
+       "name": "open"
+      },
+      {
+       "from": 7,
+       "to": 11,
+       "name": "red"
+      },
+      {
+       "from": 12,
+       "to": 16,
+       "name": "green"
+      },
+      {
+       "from": 17,
+       "to": 21,
+       "name": "light blue"
+      },
+      {
+       "from": 22,
+       "to": 26,
+       "name": "yellow"
+      },
+      {
+       "from": 27,
+       "to": 31,
+       "name": "magenta"
+      },
+      {
+       "from": 32,
+       "to": 36,
+       "name": "lime"
+      },
+      {
+       "from": 37,
+       "to": 41,
+       "name": "uv"
+      },
+      {
+       "from": 42,
+       "to": 46,
+       "name": "pink"
+      },
+      {
+       "from": 47,
+       "to": 51,
+       "name": "orange"
+      },
+      {
+       "from": 52,
+       "to": 56,
+       "name": "cyan"
+      },
+      {
+       "from": 57,
+       "to": 61,
+       "name": "cold (ctb)"
+      },
+      {
+       "from": 62,
+       "to": 66,
+       "name": "lavender"
+      },
+      {
+       "from": 67,
+       "to": 71,
+       "name": "cto"
+      },
+      {
+       "from": 72,
+       "to": 75,
+       "name": "open + red"
+      },
+      {
+       "from": 76,
+       "to": 79,
+       "name": "red + green"
+      },
+      {
+       "from": 80,
+       "to": 83,
+       "name": "green + light blue"
+      },
+      {
+       "from": 84,
+       "to": 87,
+       "name": "light blue + yellow"
+      },
+      {
+       "from": 88,
+       "to": 91,
+       "name": "yellow + magenta"
+      },
+      {
+       "from": 92,
+       "to": 95,
+       "name": "magenta + lime"
+      },
+      {
+       "from": 96,
+       "to": 99,
+       "name": "lime + uv"
+      },
+      {
+       "from": 100,
+       "to": 103,
+       "name": "uv + pink"
+      },
+      {
+       "from": 104,
+       "to": 107,
+       "name": "pink + orange"
+      },
+      {
+       "from": 108,
+       "to": 111,
+       "name": "orange + cyan"
+      },
+      {
+       "from": 112,
+       "to": 115,
+       "name": "cyan + cold (ctb)"
+      },
+      {
+       "from": 116,
+       "to": 119,
+       "name": "cold (ctb) + lavender"
+      },
+      {
+       "from": 120,
+       "to": 123,
+       "name": "lavender + cto"
+      },
+      {
+       "from": 124,
+       "to": 127,
+       "name": "cto + open"
+      },
+      {
+       "from": 128,
+       "to": 189,
+       "name": "wheel ccw fast to slow"
+      },
+      {
+       "from": 190,
+       "to": 193,
+       "name": "wheel stop"
+      },
+      {
+       "from": 194,
+       "to": 255,
+       "name": "wheel cw slow to fast"
+      }
+     ]
+    },
+    {
+     "index": 9,
+     "name": "Gobo",
+     "type": "gobo",
+     "group": "gobo",
+     "ranges": [
+      {
+       "from": 0,
+       "to": 2,
+       "name": "open"
+      },
+      {
+       "from": 3,
+       "to": 6,
+       "name": "beam reducer 1"
+      },
+      {
+       "from": 7,
+       "to": 10,
+       "name": "beam reducer 2"
+      },
+      {
+       "from": 11,
+       "to": 14,
+       "name": "beam reducer 3"
+      },
+      {
+       "from": 15,
+       "to": 18,
+       "name": "triangle"
+      },
+      {
+       "from": 19,
+       "to": 22,
+       "name": "circle"
+      },
+      {
+       "from": 23,
+       "to": 26,
+       "name": "swirl"
+      },
+      {
+       "from": 27,
+       "to": 30,
+       "name": "3dots line"
+      },
+      {
+       "from": 31,
+       "to": 34,
+       "name": "3bars"
+      },
+      {
+       "from": 35,
+       "to": 38,
+       "name": "radioactive"
+      },
+      {
+       "from": 39,
+       "to": 42,
+       "name": "flower6"
+      },
+      {
+       "from": 43,
+       "to": 46,
+       "name": "asterisk"
+      },
+      {
+       "from": 47,
+       "to": 50,
+       "name": "4dots square"
+      },
+      {
+       "from": 51,
+       "to": 54,
+       "name": "star"
+      },
+      {
+       "from": 55,
+       "to": 58,
+       "name": "7dots flower"
+      },
+      {
+       "from": 59,
+       "to": 62,
+       "name": "flower5"
+      },
+      {
+       "from": 63,
+       "to": 66,
+       "name": "circle2"
+      },
+      {
+       "from": 67,
+       "to": 70,
+       "name": "10dots circle"
+      },
+      {
+       "from": 71,
+       "to": 77,
+       "name": "beam reducer 1 shake slow to fast"
+      },
+      {
+       "from": 78,
+       "to": 84,
+       "name": "beam reducer 2 shake slow to fast"
+      },
+      {
+       "from": 85,
+       "to": 91,
+       "name": "beam reducer 3 shake slow to fast"
+      },
+      {
+       "from": 92,
+       "to": 98,
+       "name": "triangle shake slow to fast"
+      },
+      {
+       "from": 99,
+       "to": 105,
+       "name": "circle shake slow to fast"
+      },
+      {
+       "from": 106,
+       "to": 112,
+       "name": "swirl shake slow to fast"
+      },
+      {
+       "from": 113,
+       "to": 119,
+       "name": "3dots line shake slow to fast"
+      },
+      {
+       "from": 120,
+       "to": 126,
+       "name": "3bars shake slow to fast"
+      },
+      {
+       "from": 127,
+       "to": 133,
+       "name": "radioactive shake slow to fast"
+      },
+      {
+       "from": 134,
+       "to": 140,
+       "name": "flower6 shake slow to fast"
+      },
+      {
+       "from": 141,
+       "to": 147,
+       "name": "asterisk shake slow to fast"
+      },
+      {
+       "from": 148,
+       "to": 154,
+       "name": "4dots square shake slow to fast"
+      },
+      {
+       "from": 155,
+       "to": 161,
+       "name": "star shake slow to fast"
+      },
+      {
+       "from": 162,
+       "to": 168,
+       "name": "7dots flower shake slow to fast"
+      },
+      {
+       "from": 169,
+       "to": 175,
+       "name": "flower5 shake slow to fast"
+      },
+      {
+       "from": 176,
+       "to": 182,
+       "name": "circle2 shake slow to fast"
+      },
+      {
+       "from": 183,
+       "to": 189,
+       "name": "10dots circle shake slow to fast"
+      },
+      {
+       "from": 190,
+       "to": 221,
+       "name": "wheel ccw fast to slow"
+      },
+      {
+       "from": 222,
+       "to": 223,
+       "name": "wheel stop"
+      },
+      {
+       "from": 224,
+       "to": 255,
+       "name": "wheel cw slow to fast"
+      }
+     ]
+    },
+    {
+     "index": 10,
+     "name": "Effect",
+     "type": "effect",
+     "group": "beam",
+     "ranges": [
+      {
+       "from": 0,
+       "to": 127,
+       "name": "rainbow out"
+      },
+      {
+       "from": 128,
+       "to": 255,
+       "name": "rainbow in"
+      }
+     ]
+    },
+    {
+     "index": 11,
+     "name": "Prism",
+     "type": "prism",
+     "group": "beam",
+     "ranges": [
+      {
+       "from": 0,
+       "to": 127,
+       "name": "prism out"
+      },
+      {
+       "from": 128,
+       "to": 255,
+       "name": "prism in"
+      }
+     ]
+    },
+    {
+     "index": 12,
+     "name": "Prism Rot",
+     "type": "prism rot",
+     "group": "beam",
+     "ranges": [
+      {
+       "from": 0,
+       "to": 127,
+       "name": "prism index 0-400"
+      },
+      {
+       "from": 128,
+       "to": 190,
+       "name": "rotation cw fast to slow"
+      },
+      {
+       "from": 191,
+       "to": 192,
+       "name": "rotation stop"
+      },
+      {
+       "from": 193,
+       "to": 255,
+       "name": "rotation ccw slow to fast"
+      }
+     ]
+    },
+    {
+     "index": 13,
+     "name": "Focus",
+     "type": "focus",
+     "group": "focus",
+     "ranges": [
+      {
+       "from": 0,
+       "to": 255,
+       "name": "focus far to near"
+      }
+     ]
+    },
+    {
+     "index": 14,
+     "name": "Reset",
+     "type": "reset",
+     "group": "control",
+     "ranges": [
+      {
+       "from": 0,
+       "to": 199,
+       "name": "no function"
+      },
+      {
+       "from": 200,
+       "to": 205,
+       "name": "all motor reset"
+      },
+      {
+       "from": 206,
+       "to": 255,
+       "name": "no function"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
