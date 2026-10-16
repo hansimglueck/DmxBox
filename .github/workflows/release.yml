@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        env: [heltec-v4, esp32dev, esp32-c3-devkitm-1]
+        env: [heltec-v4, esp32-s3-n16r8, esp32dev, esp32-c3-devkitm-1]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

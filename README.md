@@ -28,15 +28,18 @@ die Firmware bauen, flashen oder weiterentwickeln.
 | Env (`platformio.ini`) | Board | Besonderheiten |
 |---|---|---|
 | `heltec-v4` | Heltec WiFi LoRa 32 V4 (ESP32-S3, 16 MB Flash) | OLED, LoRa 869,525 MHz, Online-Update |
+| `esp32-s3-n16r8` | ESP32-S3 mit 16 MB Flash / 8 MB PSRAM (z.B. DevKitC-1-N16R8) | ohne LoRa und OLED, mit Online-Update; gut zum Arbeiten an der Oberfläche |
 | `esp32dev` | ESP32 DevKit | ohne LoRa und Online-Update (App-Partition zu klein) |
 | `esp32-c3-devkitm-1` | ESP32-C3 | ohne LoRa und Online-Update |
 | `esp32dev-recovery` | ESP32 DevKit | Minimal-Firmware: nur AP und OTA, zum Retten |
 
 DMX läuft über einen RS-485-Transceiver. Die Pins kommen pro Env aus den Build-Flags `DMX_SERIAL_OUTPUT_PIN`,
-`DMX_SERIAL_INPUT_PIN` und `DMX_DIRECTION_PIN`. Beim Heltec V4 sind das 48, 47 und 45.
+`DMX_SERIAL_INPUT_PIN` und `DMX_DIRECTION_PIN`. Beim Heltec V4 sind das 48, 47 und 45, beim
+`esp32-s3-n16r8` 17, 18 und 16.
 
 > **Achtung ESP32-S3:** GPIO26 ist dort der Chip-Select des PSRAM. Diesen Pin nie für DMX oder anderes
-> verwenden, die Box stürzt sonst ab.
+> verwenden, die Box stürzt sonst ab. Bei Modulen mit Octal-PSRAM (z.B. N16R8) sind außerdem GPIO35–37
+> belegt.
 
 ## Bauen und flashen
 
